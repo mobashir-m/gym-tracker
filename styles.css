@@ -225,6 +225,15 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .ss-rest span { font-size: 11px; color: var(--text-faint); }
 .ss-rest select { width: 80px; background: var(--bg-elev-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px; font-size: 13px; }
 
+/* ---------- Blocks (mesocycles) ---------- */
+.block-eyebrow { font-size: 10px; text-transform: uppercase; letter-spacing: .09em; color: var(--accent); font-weight: 700; }
+.block-name-input { font-size: 20px; font-weight: 750; letter-spacing: -0.01em; margin-top: 6px; padding: 9px 11px; }
+.block-selector { display: block; width: 100%; text-align: left; background: var(--bg-elev); border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 12px 14px; transition: border-color .15s; }
+.block-selector:active { border-color: var(--line); }
+.block-selector .bs-name { display: block; font-size: 18px; font-weight: 700; margin: 3px 0; }
+.block-selector .bs-caret { color: var(--text-faint); font-size: 14px; }
+.pr-row { font-size: 14px; font-weight: 600; }
+
 /* ---------- Charts ---------- */
 .chart-wrap { width: 100%; overflow-x: auto; }
 svg.chart { display: block; width: 100%; height: auto; }

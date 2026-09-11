@@ -1,5 +1,5 @@
 /* Service worker: offline app-shell cache. Bump CACHE to force update. */
-const CACHE = 'gym-v1';
+const CACHE = 'gym-v2';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg'];
 
 self.addEventListener('install', e => {

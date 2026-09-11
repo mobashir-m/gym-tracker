@@ -40,6 +40,7 @@ function defaults() {
     curl:   mk('Barbell Curl', 'lifting', 'Biceps'),
     run:    mk('Running', 'cardio', 'Cardio'),
   };
+  const block = { id: uid(), name: 'Block 1', startDate: start };
   return {
     version: 1,
     settings: {
@@ -49,20 +50,22 @@ function defaults() {
       github: { owner: '', repo: '', path: '', branch: 'main', token: '', user: '' },
     },
     exercises: Object.values(ex),
+    blocks: [block],
+    activeBlockId: block.id,
     workouts: [
-      { id: uid(), name: 'Push', items: [
+      { id: uid(), name: 'Push', blockId: block.id, items: [
         { exerciseId: ex.bench.id, sets: 4 },
         { exerciseId: ex.ohp.id, sets: 3 },
         { exerciseId: ex.incline.id, sets: 3 },
         { exerciseId: ex.pushd.id, sets: 3 },
       ]},
-      { id: uid(), name: 'Pull', items: [
+      { id: uid(), name: 'Pull', blockId: block.id, items: [
         { exerciseId: ex.dead.id, sets: 3 },
         { exerciseId: ex.row.id, sets: 4 },
         { exerciseId: ex.pull.id, sets: 3 },
         { exerciseId: ex.curl.id, sets: 3 },
       ]},
-      { id: uid(), name: 'Legs', items: [
+      { id: uid(), name: 'Legs', blockId: block.id, items: [
         { exerciseId: ex.squat.id, sets: 4 },
       ]},
     ],
@@ -83,6 +86,16 @@ function load() {
     s.workouts = s.workouts || [];
     s.sessions = s.sessions || [];
     s.supersets = s.supersets || [];
+    // --- training blocks migration (wrap pre-block data into an initial block) ---
+    s.blocks = s.blocks || [];
+    if (!s.blocks.length) {
+      s.blocks = [{ id: uid(), name: 'Block 1', startDate: s.settings.cycleStartDate || todayStr() }];
+    }
+    if (!s.activeBlockId || !s.blocks.some(b => b.id === s.activeBlockId)) {
+      s.activeBlockId = s.blocks[s.blocks.length - 1].id;
+    }
+    s.workouts.forEach(w => { if (!w.blockId) w.blockId = s.activeBlockId; });
+    s.sessions.forEach(se => { if (!se.blockId) se.blockId = s.activeBlockId; });
     return s;
   } catch (e) {
     console.warn('load failed, using defaults', e);
@@ -100,6 +113,9 @@ function save() {
 const exById = id => state.exercises.find(e => e.id === id);
 const woById = id => state.workouts.find(w => w.id === id);
 const ssById = id => (state.supersets || []).find(s => s.id === id);
+const blockById = id => (state.blocks || []).find(b => b.id === id);
+const activeBlock = () => blockById(state.activeBlockId) || (state.blocks || [])[Math.max(0, (state.blocks || []).length - 1)];
+const blockWorkouts = bid => state.workouts.filter(w => w.blockId === bid);
 const supersetName = ss => ss.name || (ss.components || []).map(c => (exById(c.exerciseId) || {}).name).filter(Boolean).join(' + ');
 const unit = () => state.settings.units;
 
@@ -151,7 +167,7 @@ function exerciseSetsHistory(exId) {
       // RIR counts as reps left in the tank → effective reps for the 1RM estimate
       const best1rm = Math.max(...sets.map(st => epley(st.weight, (+st.reps || 0) + (+st.rir || 0))));
       const volume = sets.reduce((a, st) => a + (+st.weight || 0) * (+st.reps || 0), 0);
-      out.push({ date: s.date, sets, topWeight, best1rm, volume });
+      out.push({ date: s.date, blockId: s.blockId, sets, topWeight, best1rm, volume });
     }
   }
   return out.sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -219,16 +235,19 @@ function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<'
 
 /* ---------------- TRAIN: list of workouts ---------------- */
 function renderTrainList(v) {
-  if (!state.workouts.length) {
-    v.innerHTML = `<h1 class="page-title">Train</h1>` + emptyState('🛠️', 'No workouts yet', 'Head to Build to create your first workout.', 'Go to Build', 'build');
+  const block = activeBlock();
+  const workouts = block ? blockWorkouts(block.id) : state.workouts;
+  const blockLine = block ? `<div class="block-eyebrow">${esc(block.name)}</div>` : '';
+  if (!workouts.length) {
+    v.innerHTML = `${blockLine}<h1 class="page-title">Train</h1>` + emptyState('🛠️', 'No workouts in this block', 'Head to Build to add workouts to this block.', 'Go to Build', 'build');
     return;
   }
-  const cards = state.workouts.map(w => `<button class="tile" data-action="open-workout" data-id="${w.id}">
+  const cards = workouts.map(w => `<button class="tile" data-action="open-workout" data-id="${w.id}">
       <span class="emoji-badge">🏋️</span>
       <span class="grow"><span class="tile-title">${esc(w.name)}</span></span>
       <span class="tile-chev">›</span>
     </button>`).join('');
-  v.innerHTML = `<h1 class="page-title">Train</h1><div class="list">${cards}</div>`;
+  v.innerHTML = `${blockLine}<h1 class="page-title">Train</h1><div class="list">${cards}</div>`;
 }
 
 /* ---------------- TRAIN: log a session ----------------
@@ -419,75 +438,97 @@ function collectSession() {
       entries.push({ exerciseId: exd.exId, name: exd.name, type: 'lifting', swappedFrom: exd.swappedFrom, note: joinNotes(exd.note, ...skipLines), sets });
     }
   }
-  return { id: uid(), workoutId: w.id, workoutName: w.name, date: draft.date, entries };
+  return { id: uid(), workoutId: w.id, workoutName: w.name, blockId: w.blockId || state.activeBlockId, date: draft.date, entries };
 }
 
 /* ---------------- PROGRESS ---------------- */
+function blockRange(block) {
+  const sorted = [...state.blocks].sort((a, b) => (a.startDate < b.startDate ? -1 : 1));
+  const idx = sorted.findIndex(b => b.id === block.id);
+  return { start: block.startDate, end: (idx >= 0 && idx < sorted.length - 1) ? addDays(sorted[idx + 1].startDate, -1) : null };
+}
+
 function renderProgress(v) {
-  const ci = currentCycleIndex();
-  const curVol = cycleVolume(ci);
-  const prevVol = cycleVolume(ci - 1);
-  const delta = prevVol > 0 ? Math.round(((curVol - prevVol) / prevVol) * 100) : null;
-  const r = cycleRange(ci);
+  const block = blockById(route.progressBlockId) || activeBlock();
+  if (!block) { v.innerHTML = `<h1 class="page-title">Progress</h1>` + emptyState('📊', 'No data yet', 'Log a workout to see progress.'); return; }
+  const range = blockRange(block);
+  const rangeTxt = range.end ? `${fmtDate(range.start)} – ${fmtDate(range.end)}` : `${fmtDate(range.start)} – now`;
+  const bSessions = state.sessions.filter(s => s.blockId === block.id);
+  const blockVol = bSessions.reduce((a, s) => a + sessionVolume(s), 0);
 
-  // last up-to-8 cycles bar chart (only cycles that have data or are recent)
-  const bars = [];
-  for (let i = ci - 6; i <= ci; i++) {
-    bars.push({ label: 'C' + (i + 1), value: cycleVolume(i), dim: i !== ci });
-  }
+  // volume per 8-day cycle WITHIN this block
+  const cyMap = {};
+  bSessions.forEach(s => { const ci = cycleIndexOf(s.date); cyMap[ci] = (cyMap[ci] || 0) + sessionVolume(s); });
+  const cyIdxs = Object.keys(cyMap).map(Number).sort((a, b) => a - b);
+  const cycleBars = cyIdxs.map((ci, i) => ({ label: 'C' + (ci + 1), value: cyMap[ci], dim: i !== cyIdxs.length - 1 }));
 
-  const totalSessions = state.sessions.length;
-  const exercisesWithData = state.exercises.filter(e => exerciseSetsHistory(e.id).length);
+  // PRs whose all-time top weight was set inside this block
+  const prBlock = state.exercises.map(e => {
+    const pr = prsFor(e.id); if (!pr) return null;
+    const top = exerciseSetsHistory(e.id).find(x => x.topWeight === pr.topWeight);
+    return (top && top.blockId === block.id) ? `${esc(e.name)} · ${Math.round(pr.topWeight)} ${unit()}` : null;
+  }).filter(Boolean);
 
-  const exTiles = exercisesWithData.map(e => {
+  // volume comparison across all blocks
+  const blockVols = [...state.blocks].sort((a, b) => (a.startDate < b.startDate ? -1 : 1)).map(b => ({
+    label: b.name.length > 9 ? b.name.slice(0, 8) + '…' : b.name,
+    value: state.sessions.filter(s => s.blockId === b.id).reduce((a, s) => a + sessionVolume(s), 0),
+    dim: b.id !== block.id,
+  }));
+
+  // per-exercise (all-time, continuous) + supersets
+  const exTiles = state.exercises.filter(e => exerciseSetsHistory(e.id).length).map(e => {
     const pr = prsFor(e.id);
     return `<button class="tile" data-action="open-exercise" data-id="${e.id}">
       <span class="emoji-badge">${e.type === 'cardio' ? '🏃' : '🏋️'}</span>
-      <span class="grow"><span class="tile-title">${esc(e.name)}</span>
-        <span class="tile-sub">PR ${Math.round(pr.topWeight)} ${unit()} · e1RM ${Math.round(pr.best1rm)} ${unit()}</span></span>
+      <span class="grow"><span class="tile-title">${esc(e.name)}</span><span class="tile-sub">PR ${Math.round(pr.topWeight)} ${unit()} · e1RM ${Math.round(pr.best1rm)} ${unit()}</span></span>
       <span class="tile-chev">›</span></button>`;
   }).join('');
   const ssTiles = (state.supersets || []).filter(ss => supersetHistory(ss.id).length).map(ss => {
     const n = supersetHistory(ss.id).length;
     return `<button class="tile" data-action="open-superset" data-id="${ss.id}">
       <span class="emoji-badge">🔗</span>
-      <span class="grow"><span class="tile-title">${esc(supersetName(ss))}</span>
-        <span class="tile-sub">superset · ${n} session${n > 1 ? 's' : ''}</span></span>
+      <span class="grow"><span class="tile-title">${esc(supersetName(ss))}</span><span class="tile-sub">superset · ${n} session${n > 1 ? 's' : ''}</span></span>
       <span class="tile-chev">›</span></button>`;
   }).join('');
   const exRows = (exTiles + ssTiles) || `<div class="empty small">Log a workout to see per-exercise progress.</div>`;
 
-  const history = sessionsSorted().slice(0, 12).map(s => `
+  const history = bSessions.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 15).map(s => `
     <button class="tile" data-action="open-session" data-id="${s.id}">
       <span class="emoji-badge">${s.entries.some(e => e.type === 'cardio') ? '🏃' : '🏋️'}</span>
       <span class="grow"><span class="tile-title">${esc(s.workoutName || 'Workout')}</span>
         <span class="tile-sub">${fmtDateFull(s.date)} · ${Math.round(sessionVolume(s)).toLocaleString()} ${unit()}</span></span>
-      <span class="tile-chev">›</span></button>`).join('') || `<div class="empty small">No sessions logged yet.</div>`;
+      <span class="tile-chev">›</span></button>`).join('') || `<div class="empty small">No sessions in this block yet.</div>`;
 
   v.innerHTML = `
     <h1 class="page-title">Progress</h1>
-    <div class="stat-grid" style="margin-bottom:22px">
-      <div class="stat"><div class="k">This cycle volume</div><div class="v">${Math.round(curVol).toLocaleString()}</div>
-        <div class="d ${delta === null ? '' : delta >= 0 ? 'up' : 'down'}">${delta === null ? `${unit()}` : (delta >= 0 ? '▲' : '▼') + ' ' + Math.abs(delta) + '% vs last'}</div></div>
-      <div class="stat"><div class="k">Cycle ${ci + 1}</div><div class="v">${cycleSessionCount(ci)}</div><div class="d muted">${fmtDate(r.start)}–${fmtDate(r.end)}</div></div>
-      <div class="stat"><div class="k">Total sessions</div><div class="v">${totalSessions}</div><div class="d muted">all time</div></div>
-      <div class="stat"><div class="k">Exercises</div><div class="v">${state.exercises.length}</div><div class="d muted">in library</div></div>
+    <button class="block-selector" data-action="progress-blocks">
+      <span class="block-eyebrow">Block</span>
+      <span class="bs-name">${esc(block.name)} <span class="bs-caret">▾</span></span>
+      <span class="faint small">${rangeTxt}</span>
+    </button>
+
+    <div class="stat-grid" style="margin:14px 0 22px">
+      <div class="stat"><div class="k">Block volume</div><div class="v">${Math.round(blockVol).toLocaleString()}</div><div class="d muted">${unit()}</div></div>
+      <div class="stat"><div class="k">Sessions</div><div class="v">${bSessions.length}</div><div class="d muted">this block</div></div>
+      <div class="stat"><div class="k">Cycles</div><div class="v">${cyIdxs.length}</div><div class="d muted">8-day</div></div>
+      <div class="stat"><div class="k">PRs</div><div class="v">${prBlock.length}</div><div class="d muted">this block</div></div>
     </div>
 
-    <div class="section">
-      <div class="section-head"><h2>Volume per cycle</h2></div>
-      <div class="card">${barChart(bars)}</div>
-    </div>
+    <div class="section"><div class="section-head"><h2>Volume per 8-day cycle</h2></div>
+      <div class="card">${barChart(cycleBars)}</div></div>
 
-    <div class="section">
-      <div class="section-head"><h2>Per-exercise progress</h2></div>
-      <div class="list">${exRows}</div>
-    </div>
+    ${prBlock.length ? `<div class="section"><div class="section-head"><h2>PRs this block</h2></div>
+      <div class="card"><div class="stack">${prBlock.map(p => `<div class="pr-row">🏆 ${p}</div>`).join('')}</div></div></div>` : ''}
 
-    <div class="section">
-      <div class="section-head"><h2>History</h2></div>
-      <div class="list">${history}</div>
-    </div>`;
+    ${state.blocks.length > 1 ? `<div class="section"><div class="section-head"><h2>Volume by block</h2></div>
+      <div class="card">${barChart(blockVols)}</div></div>` : ''}
+
+    <div class="section"><div class="section-head"><h2>Per-exercise progress</h2><span class="chip">all-time</span></div>
+      <div class="list">${exRows}</div></div>
+
+    <div class="section"><div class="section-head"><h2>History · ${esc(block.name)}</h2></div>
+      <div class="list">${history}</div></div>`;
 }
 
 function renderExerciseDetail(v) {
@@ -556,13 +597,29 @@ function renderSupersetDetail(v) {
 
 /* ---------------- BUILD ---------------- */
 function renderBuild(v) {
-  const workouts = state.workouts.map(w => {
-    const sub = w.items.length ? w.items.length + ' exercises · ' + w.items.reduce((a, i) => a + (i.sets || 0), 0) + ' sets' : 'Empty';
+  const block = activeBlock();
+  const bWorkouts = block ? blockWorkouts(block.id) : state.workouts;
+  const bSessions = block ? state.sessions.filter(s => s.blockId === block.id).length : 0;
+
+  const blockCard = block ? `
+    <div class="card block-head">
+      <div class="block-eyebrow">Active block</div>
+      <input class="block-name-input" data-action="block-name" value="${esc(block.name)}" />
+      <div class="faint small" style="margin-top:4px">Started ${fmtDateFull(block.startDate)} · ${bWorkouts.length} workout${bWorkouts.length !== 1 ? 's' : ''} · ${bSessions} session${bSessions !== 1 ? 's' : ''}</div>
+      <div class="row wrap" style="margin-top:12px;gap:8px">
+        <button class="btn sm" data-action="blocks-sheet">⇄ Switch block</button>
+        <button class="btn sm" data-action="new-block">＋ New block</button>
+      </div>
+    </div>` : '';
+
+  const workouts = bWorkouts.map(w => {
+    const nSets = w.items.reduce((a, i) => a + (i.sets || 0), 0);
+    const sub = w.items.length ? `${w.items.length} exercise${w.items.length !== 1 ? 's' : ''} · ${nSets} set${nSets !== 1 ? 's' : ''}` : 'Empty';
     return `<button class="tile" data-action="edit-workout" data-id="${w.id}">
       <span class="emoji-badge">🏋️</span>
       <span class="grow"><span class="tile-title">${esc(w.name)}</span><span class="tile-sub">${sub}</span></span>
       <span class="tile-chev">›</span></button>`;
-  }).join('') || `<div class="empty small">No workouts yet.</div>`;
+  }).join('') || `<div class="empty small">No workouts in this block yet.</div>`;
 
   const exList = state.exercises.map(e => `
     <button class="tile" data-action="edit-exercise" data-id="${e.id}">
@@ -573,12 +630,14 @@ function renderBuild(v) {
 
   v.innerHTML = `
     <h1 class="page-title">Build</h1>
+    ${blockCard}
     <div class="section">
-      <div class="section-head"><h2>Workouts</h2><button class="btn sm primary" data-action="new-workout">+ New</button></div>
+      <div class="section-head"><h2>Workouts in this block</h2><button class="btn sm primary" data-action="new-workout">+ New</button></div>
       <div class="list">${workouts}</div>
     </div>
     <div class="section">
       <div class="section-head"><h2>Exercise library</h2><button class="btn sm" data-action="new-exercise">+ Add</button></div>
+      <p class="faint small" style="margin:-4px 2px 10px">Shared across all blocks.</p>
       <div class="list">${exList}</div>
     </div>`;
 }
@@ -869,6 +928,36 @@ function renderSupersetBuilder() {
   $$('[data-ssb-remove]', back).forEach(b => b.addEventListener('click', () => { route._ssb.components.splice(+b.dataset.ssbRemove, 1); renderSupersetBuilder(); }));
 }
 
+/* ---------------- blocks (mesocycles) ---------------- */
+function blocksSheet() {
+  const rows = [...state.blocks].reverse().map(b => {
+    const wc = blockWorkouts(b.id).length;
+    const sc = state.sessions.filter(s => s.blockId === b.id).length;
+    const active = b.id === state.activeBlockId;
+    return `<div class="ss-builder-row">
+      <button class="grow" data-action="switch-block" data-id="${b.id}" style="text-align:left;background:none;border:none;padding:0;color:inherit">
+        <strong>${esc(b.name)}</strong>${active ? ' <span class="chip accent">active</span>' : ''}
+        <div class="faint small" style="margin-top:2px">${fmtDate(b.startDate)} · ${wc} workouts · ${sc} sessions</div></button>
+      ${state.blocks.length > 1 ? `<button class="btn ghost icon" data-action="del-block" data-id="${b.id}" style="color:var(--danger)">✕</button>` : ''}
+    </div>`;
+  }).join('');
+  openSheet('Training blocks', `<div class="stack">${rows}</div>
+    <button class="btn primary block" data-action="new-block" style="margin-top:14px">＋ New block</button>
+    <p class="faint small center" style="margin-top:8px">A new block copies this block's workouts so you can tweak them.</p>`);
+}
+function progressBlocksSheet() {
+  const viewing = route.progressBlockId || state.activeBlockId;
+  const rows = [...state.blocks].sort((a, b) => (a.startDate < b.startDate ? 1 : -1)).map(b => {
+    const sc = state.sessions.filter(s => s.blockId === b.id).length;
+    const vol = state.sessions.filter(s => s.blockId === b.id).reduce((a, s) => a + sessionVolume(s), 0);
+    return `<button class="tile" data-action="view-block" data-id="${b.id}">
+      <span class="emoji-badge">📦</span>
+      <span class="grow"><span class="tile-title">${esc(b.name)}${b.id === viewing ? ' <span class="chip accent">viewing</span>' : ''}</span>
+        <span class="tile-sub">${fmtDate(b.startDate)} · ${sc} sessions · ${Math.round(vol).toLocaleString()} ${unit()}</span></span></button>`;
+  }).join('');
+  openSheet('View block', `<div class="list">${rows}</div>`);
+}
+
 /* ---------------- rest timer: counts UP from 0 toward the target, visual only ---------------- */
 let restState = null;   // { name, target, start }
 let restInterval = null;
@@ -1016,6 +1105,8 @@ document.addEventListener('click', e => {
     /* progress */
     case 'open-exercise': route = { tab: 'progress', exerciseId: id }; return render();
     case 'open-superset': route = { tab: 'progress', supersetId: id }; return render();
+    case 'progress-blocks': return progressBlocksSheet();
+    case 'view-block': route = { tab: 'progress', progressBlockId: btn.dataset.id }; closeSheet(); return render();
     case 'open-session': return sessionDetailSheet(id);
     case 'del-session': {
       state.sessions = state.sessions.filter(s => s.id !== btn.dataset.id); save();
@@ -1024,8 +1115,28 @@ document.addEventListener('click', e => {
 
     /* build: workouts */
     case 'new-workout': {
-      const w = { id: uid(), name: 'New workout', items: [] };
+      const w = { id: uid(), name: 'New workout', blockId: state.activeBlockId, items: [] };
       state.workouts.push(w); save(); route = { tab: 'build', workoutId: w.id }; return render();
+    }
+    /* build: blocks */
+    case 'new-block': {
+      const cur = activeBlock();
+      const nb = { id: uid(), name: 'New block', startDate: todayStr() };
+      state.blocks.push(nb);
+      if (cur) blockWorkouts(cur.id).forEach(w => state.workouts.push({ id: uid(), name: w.name, blockId: nb.id, items: JSON.parse(JSON.stringify(w.items)) }));
+      state.activeBlockId = nb.id;
+      save(); toast('New block — rename it & tweak the workouts'); return render();
+    }
+    case 'blocks-sheet': return blocksSheet();
+    case 'switch-block': state.activeBlockId = btn.dataset.id; save(); closeSheet(); return render();
+    case 'del-block': {
+      if (state.blocks.length <= 1) return toast('Keep at least one block');
+      if (!confirm('Delete this block and its workouts? Logged sessions are kept for your history.')) return;
+      const bid = btn.dataset.id;
+      state.blocks = state.blocks.filter(b => b.id !== bid);
+      state.workouts = state.workouts.filter(w => w.blockId !== bid);
+      if (state.activeBlockId === bid) state.activeBlockId = state.blocks[state.blocks.length - 1].id;
+      save(); closeSheet(); return render();
     }
     case 'edit-workout': route = { tab: 'build', workoutId: id }; return render();
     case 'del-workout': {
@@ -1119,6 +1230,7 @@ document.addEventListener('change', e => {
 document.addEventListener('input', e => {
   const t = e.target;
   if (t.matches('[data-action=workout-name]')) { woById(route.workoutId).name = t.value; save(); return; }
+  if (t.matches('[data-action=block-name]')) { const b = activeBlock(); if (b) { b.name = t.value; save(); } return; }
   // live-session draft fields (not persisted until the workout is saved)
   if (route._draft && t.dataset.xi !== undefined) {
     const exd = route._draft.exercises[+t.dataset.xi];
@@ -1197,7 +1309,8 @@ function b64decode(b64) { return decodeURIComponent(escape(atob(b64))); }
 
 function syncPayload() {
   const { github, ...settings } = state.settings; // never push the token
-  return { version: state.version, settings, exercises: state.exercises, workouts: state.workouts, sessions: state.sessions };
+  return { version: state.version, settings, exercises: state.exercises, workouts: state.workouts,
+    sessions: state.sessions, supersets: state.supersets, blocks: state.blocks, activeBlockId: state.activeBlockId };
 }
 
 async function ghGetSha() {
@@ -1241,6 +1354,14 @@ async function ghPull() {
     const gh = state.settings.github;
     state = Object.assign({}, json);
     state.settings = Object.assign({}, defaults().settings, json.settings || {}, { github: gh });
+    // heal fields that older cloud data may lack
+    state.exercises = state.exercises || []; state.workouts = state.workouts || [];
+    state.sessions = state.sessions || []; state.supersets = state.supersets || [];
+    state.blocks = state.blocks || [];
+    if (!state.blocks.length) state.blocks = [{ id: uid(), name: 'Block 1', startDate: state.settings.cycleStartDate || todayStr() }];
+    if (!state.activeBlockId || !state.blocks.some(b => b.id === state.activeBlockId)) state.activeBlockId = state.blocks[state.blocks.length - 1].id;
+    state.workouts.forEach(w => { if (!w.blockId) w.blockId = state.activeBlockId; });
+    state.sessions.forEach(se => { if (!se.blockId) se.blockId = state.activeBlockId; });
     save(); render(); ghStatus('✅ Pulled ' + new Date().toLocaleTimeString()); toast('☁️ Pulled latest');
   } catch (e) { ghStatus('❌ ' + e.message); toast('Pull failed'); }
 }
