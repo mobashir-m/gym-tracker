@@ -1,6 +1,6 @@
 /* Service worker: NETWORK-FIRST so a redeploy always reaches the device when online;
    the cache is only an offline fallback (gym works with no signal). */
-const CACHE = 'gym-v3';
+const CACHE = 'gym-v4';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg'];
 
 self.addEventListener('install', e => {

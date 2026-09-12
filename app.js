@@ -6,6 +6,7 @@
 
 'use strict';
 
+const APP_VERSION = '2026.09.12-a';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -769,6 +770,7 @@ function renderSettings(v) {
       </div>
     </div>
     <p class="faint small center">Gym Tracker · local-first · your data lives on your device${g.token ? ' + your private repo' : ''}.</p>
+    <p class="faint small center" style="margin-top:2px">version ${APP_VERSION}</p>
     <div style="height:12px"></div>`;
 }
 
