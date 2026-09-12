@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.12-b';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.12-c';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -50,7 +50,9 @@ function defaults() {
       units: 'kg',
       cycleStartDate: start,
       cycleLengthDays: 8,
-      github: { owner: '', repo: '', path: '', branch: 'main', token: '', user: '' },
+      // Prefilled with your details so a fresh install / new device is ready — all editable in Settings if you share it.
+      // The token is deliberately NOT prefilled: this repo is public and the token is a secret, so you paste it per device.
+      github: { owner: 'mobashir-m', repo: 'gym-data', path: '', branch: 'main', token: '', user: 'mobashir' },
     },
     exercises: Object.values(ex),
     blocks: [block],
