@@ -24,6 +24,8 @@ const fmtDateFull = s => parseYmd(s).toLocaleDateString(undefined, { weekday: 's
 /* ---------- state ---------- */
 let state = load();
 let route = { tab: 'train' };
+// Persist on first boot so workout IDs are stable (keeps autosaved drafts resumable even for a brand-new user).
+try { if (!localStorage.getItem(STORE_KEY)) save(); } catch (e) {}
 
 function defaults() {
   const start = todayStr();
@@ -107,6 +109,22 @@ function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (e) { toast('⚠️ Could not save locally'); console.error(e); }
   maybeAutoPush();
+}
+
+/* ---------- in-progress workout autosave (instant, offline, survives leaving the app) ---------- */
+const DRAFT_KEY = 'gymtracker.draft.v1';
+let _draftTimer;
+function persistDraft() {
+  try { if (typeof route !== 'undefined' && route._draft) localStorage.setItem(DRAFT_KEY, JSON.stringify({ ...route._draft, savedAt: Date.now() })); }
+  catch (e) {}
+}
+function persistDraftSoon() { clearTimeout(_draftTimer); _draftTimer = setTimeout(persistDraft, 300); }
+function loadDraft() { try { return JSON.parse(localStorage.getItem(DRAFT_KEY)); } catch (e) { return null; } }
+function clearDraft() { clearTimeout(_draftTimer); try { localStorage.removeItem(DRAFT_KEY); } catch (e) {} }
+// resume a saved draft for this workout if it's recent (within 18h)
+function resumableDraft(workoutId) {
+  const d = loadDraft();
+  return (d && d.workoutId === workoutId && d.savedAt && (Date.now() - d.savedAt < 18 * 3600 * 1000)) ? d : null;
 }
 
 /* ---------- lookups ---------- */
@@ -242,11 +260,14 @@ function renderTrainList(v) {
     v.innerHTML = `${blockLine}<h1 class="page-title">Train</h1>` + emptyState('🛠️', 'No workouts in this block', 'Head to Build to add workouts to this block.', 'Go to Build', 'build');
     return;
   }
-  const cards = workouts.map(w => `<button class="tile" data-action="open-workout" data-id="${w.id}">
+  const cards = workouts.map(w => {
+    const inProgress = !!resumableDraft(w.id);
+    return `<button class="tile" data-action="open-workout" data-id="${w.id}">
       <span class="emoji-badge">🏋️</span>
-      <span class="grow"><span class="tile-title">${esc(w.name)}</span></span>
+      <span class="grow"><span class="tile-title">${esc(w.name)}</span>${inProgress ? `<span class="tile-sub" style="color:var(--accent)">● in progress — tap to resume</span>` : ''}</span>
       <span class="tile-chev">›</span>
-    </button>`).join('');
+    </button>`;
+  }).join('');
   v.innerHTML = `${blockLine}<h1 class="page-title">Train</h1><div class="list">${cards}</div>`;
 }
 
@@ -313,7 +334,7 @@ function buildDraft(w) {
 function renderSession(v) {
   const w = woById(route.workoutId);
   if (!w) { route.workoutId = null; return render(); }
-  if (!route._draft || route._draft.workoutId !== w.id) route._draft = buildDraft(w);
+  if (!route._draft || route._draft.workoutId !== w.id) route._draft = resumableDraft(w.id) || buildDraft(w);
   const draft = route._draft;
 
   const noteBtn = (xi, on) => `<button class="icon-btn ${on ? 'on' : ''}" data-action="toggle-ex-note" data-xi="${xi}" title="Note" aria-label="note">📝</button>`;
@@ -392,7 +413,9 @@ function renderSession(v) {
     ${blocks || emptyState('➕', 'No exercises', 'Add exercises to this workout in Build.', 'Go to Build', 'build')}
     <button class="btn ghost block" data-action="add-exercise-today" style="margin-top:4px">＋ Add exercise</button>
     <button class="btn primary block" data-action="save-session" style="margin-top:12px">Finish &amp; Save workout</button>
+    <p class="faint small center" style="margin-top:8px">✓ Autosaved as you go — safe to leave and come back. <button class="linklike" data-action="discard-draft">Discard</button></p>
     <div style="height:64px"></div>`;
+  persistDraft();
 }
 
 function collectSession() {
@@ -1032,7 +1055,7 @@ document.addEventListener('click', e => {
     case 'back-build': route = { tab: 'build' }; return render();
 
     /* train */
-    case 'open-workout': route = { tab: 'train', workoutId: id, _draft: buildDraft(woById(id)) }; return render();
+    case 'open-workout': route = { tab: 'train', workoutId: id, _draft: resumableDraft(id) || buildDraft(woById(id)) }; return render();
     case 'toggle-ex-note': {
       const f = $('.ex-note-field', btn.closest('.ex-block'));
       if (f) { f.hidden = !f.hidden; if (!f.hidden) $('input', f).focus(); }
@@ -1095,11 +1118,18 @@ document.addEventListener('click', e => {
       const sess = collectSession();
       if (!sess.entries.length) return toast('Nothing logged yet');
       state.sessions.push(sess); save();
+      clearDraft();                       // logged for real now — drop the autosave
       route = { tab: 'progress' }; render();
       // Push to GitHub right now so it never gets forgotten.
       if (ghConfigured()) { toast('☁️ Saving to GitHub…'); ghPush(); }
       else toast('✅ Workout saved');
       return;
+    }
+    case 'discard-draft': {
+      if (!confirm('Discard this in-progress workout? Your logged sets for it will be cleared.')) return;
+      clearDraft();
+      route = { tab: 'train', workoutId: route.workoutId, _draft: buildDraft(woById(route.workoutId)) };
+      return render();
     }
 
     /* progress */
@@ -1231,7 +1261,7 @@ document.addEventListener('input', e => {
   const t = e.target;
   if (t.matches('[data-action=workout-name]')) { woById(route.workoutId).name = t.value; save(); return; }
   if (t.matches('[data-action=block-name]')) { const b = activeBlock(); if (b) { b.name = t.value; save(); } return; }
-  // live-session draft fields (not persisted until the workout is saved)
+  // live-session draft fields — autosaved to localStorage so nothing is lost mid-workout
   if (route._draft && t.dataset.xi !== undefined) {
     const exd = route._draft.exercises[+t.dataset.xi];
     if (!exd) return;
@@ -1239,8 +1269,14 @@ document.addEventListener('input', e => {
     else if (t.dataset.fc) exd.cardio[t.dataset.fc] = t.value;
     else if (t.dataset.ci !== undefined && t.dataset.si !== undefined) exd.components[+t.dataset.ci].sets[+t.dataset.si][t.dataset.f] = t.value;
     else if (t.dataset.f && t.dataset.si !== undefined) exd.sets[+t.dataset.si][t.dataset.f] = t.value;
+    persistDraftSoon();
   }
 });
+// session-date change should also autosave
+document.addEventListener('change', e => { if (e.target.matches('[data-action=session-date]')) persistDraft(); });
+// flush the draft the instant the app is backgrounded / closed (the "I accidentally left" case)
+document.addEventListener('visibilitychange', () => { if (document.hidden) persistDraft(); });
+window.addEventListener('pagehide', persistDraft);
 /* segmented buttons (units, exercise type) */
 document.addEventListener('click', e => {
   const seg = e.target.closest('.seg button'); if (!seg) return;
