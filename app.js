@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.12-a';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.12-b';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -238,7 +238,7 @@ function render() {
   const v = view();
   v.scrollTop = 0;
   // the rest bar only lives inside an active workout
-  if (typeof stopRest === 'function' && !(route.tab === 'train' && route.workoutId)) stopRest();
+  if (typeof pauseRestUI === 'function' && !(route.tab === 'train' && route.workoutId)) pauseRestUI();
   // tabbar active state
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === route.tab));
   // header cycle chip
@@ -419,6 +419,7 @@ function renderSession(v) {
     <p class="faint small center" style="margin-top:8px">✓ Autosaved as you go — safe to leave and come back. <button class="linklike" data-action="discard-draft">Discard</button></p>
     <div style="height:64px"></div>`;
   persistDraft();
+  resumeRestIfAny();   // if a rest was running when you left, pick it back up
 }
 
 function collectSession() {
@@ -985,16 +986,19 @@ function progressBlocksSheet() {
   openSheet('View block', `<div class="list">${rows}</div>`);
 }
 
-/* ---------------- rest timer: counts UP from 0 toward the target, visual only ---------------- */
+/* ---------------- rest timer: counts UP from a saved start; survives leaving the section & app-kill ----------------
+   The active rest lives in route._draft.activeRest (persisted with the draft), so on return we recompute
+   elapsed = now - start and pick up exactly where it is. restState mirrors it for the live interval. */
 let restState = null;   // { name, target, start }
 let restInterval = null;
+const REST_RESUME_MAX = 20 * 60 * 1000;   // don't resume a rest older than 20 min (stale)
 function ensureRestBar() {
   let bar = document.getElementById('rest-bar');
   if (!bar) {
     bar = document.createElement('div');
     bar.id = 'rest-bar'; bar.className = 'rest-bar'; bar.hidden = true;
     bar.title = 'Tap to dismiss';
-    bar.addEventListener('click', stopRest);
+    bar.addEventListener('click', clearRest);
     document.body.appendChild(bar);
   }
   return bar;
@@ -1014,18 +1018,36 @@ function paintRestBar() {
       <span class="rest-time">${fmtClock(elapsed)} <span class="rest-target">/ ${fmtClock(target)}</span></span>
     </div>`;
 }
-function startRestFor(name, sec) {
-  if (!sec || sec <= 0) return;   // no target → no timer
-  restState = { name, target: sec, start: Date.now() };
+function runRestInterval() {
   if (restInterval) clearInterval(restInterval);
   restInterval = setInterval(paintRestBar, 500);
   paintRestBar();
 }
-function stopRest() {
+function startRestFor(name, sec) {
+  if (!sec || sec <= 0) return;   // no target → no timer
+  restState = { name, target: sec, start: Date.now() };
+  if (route._draft) { route._draft.activeRest = restState; persistDraft(); }
+  runRestInterval();
+}
+// leaving the workout view: stop drawing, but keep the rest saved so it resumes
+function pauseRestUI() {
+  if (restInterval) { clearInterval(restInterval); restInterval = null; }
+  const bar = document.getElementById('rest-bar'); if (bar) bar.hidden = true;
+}
+// fully dismiss (tap the bar, or when the workout is saved)
+function clearRest() {
   restState = null;
   if (restInterval) { clearInterval(restInterval); restInterval = null; }
-  const bar = document.getElementById('rest-bar');
-  if (bar) bar.hidden = true;
+  if (typeof route !== 'undefined' && route._draft) { delete route._draft.activeRest; persistDraft(); }
+  const bar = document.getElementById('rest-bar'); if (bar) bar.hidden = true;
+}
+// re-entering the workout: resume a still-recent rest at its true elapsed time
+function resumeRestIfAny() {
+  const ar = route._draft && route._draft.activeRest;
+  if (!ar) return;
+  if (Date.now() - ar.start > REST_RESUME_MAX) { delete route._draft.activeRest; persistDraft(); return; }
+  restState = ar;
+  runRestInterval();
 }
 
 /* ============================================================
@@ -1125,7 +1147,7 @@ document.addEventListener('click', e => {
       const sess = collectSession();
       if (!sess.entries.length) return toast('Nothing logged yet');
       state.sessions.push(sess); save();
-      clearDraft();                       // logged for real now — drop the autosave
+      clearRest(); clearDraft();          // logged for real now — drop the rest timer + autosave
       route = { tab: 'progress' }; render();
       // Push to GitHub right now so it never gets forgotten.
       if (ghConfigured()) { toast('☁️ Saving to GitHub…'); ghPush(); }
@@ -1134,7 +1156,7 @@ document.addEventListener('click', e => {
     }
     case 'discard-draft': {
       if (!confirm('Discard this in-progress workout? Your logged sets for it will be cleared.')) return;
-      clearDraft();
+      clearRest(); clearDraft();
       route = { tab: 'train', workoutId: route.workoutId, _draft: buildDraft(woById(route.workoutId)) };
       return render();
     }
