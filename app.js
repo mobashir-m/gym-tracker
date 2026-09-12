@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.12-c';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.12-d';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -115,6 +115,11 @@ function save() {
   catch (e) { toast('⚠️ Could not save locally'); console.error(e); }
   maybeAutoPush();
 }
+
+/* ---------- muscle groups (editable list; volume = working SETS per muscle) ---------- */
+const MUSCLE_PRESETS = ['Chest', 'Back', 'Shoulders', 'Biceps', 'Triceps', 'Legs', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Core', 'Forearms', 'Cardio'];
+const muscleKey = m => (m || '').trim().toLowerCase();
+const muscleLabel = m => (m || '').trim() || 'Unassigned';
 
 /* ---------- in-progress workout autosave (instant, offline, survives leaving the app) ---------- */
 const DRAFT_KEY = 'gymtracker.draft.v1';
@@ -297,7 +302,7 @@ function draftExercise(exId, date, nOverride) {
   const ex = exById(exId);
   if (ex.type === 'cardio') {
     const lp = (lastSetsForExercise(exId, date) || [])[0] || {};
-    return { exId, name: ex.name, type: 'cardio', note: '', cardio: { duration: lp.duration ?? '', distance: lp.distance ?? '' } };
+    return { exId, name: ex.name, type: 'cardio', note: '', cardio: { duration: lp.duration ?? '', level: lp.level ?? '' } };
   }
   const le = lastEntryForExercise(exId, date);
   const n = nOverride || (le ? le.sets.length : 3) || 3;
@@ -385,7 +390,7 @@ function renderSession(v) {
         ${tags(exd)}${noteField(xi, exd.note)}
         <div class="set-row cardio">
           <input inputmode="decimal" data-xi="${xi}" data-fc="duration" value="${exd.cardio.duration}" placeholder="min" />
-          <input inputmode="decimal" data-xi="${xi}" data-fc="distance" value="${exd.cardio.distance}" placeholder="km" />
+          <input inputmode="decimal" data-xi="${xi}" data-fc="level" value="${exd.cardio.level}" placeholder="level" />
         </div>
       </div>`;
     }
@@ -455,8 +460,8 @@ function collectSession() {
       continue;
     }
     if (exd.type === 'cardio') {
-      const d = String(exd.cardio.duration).trim(), dist = String(exd.cardio.distance).trim();
-      if (d || dist) entries.push({ exerciseId: exd.exId, name: exd.name, type: 'cardio', swappedFrom: exd.swappedFrom, note: joinNotes(exd.note), sets: [{ duration: +d || null, distance: +dist || null }] });
+      const d = String(exd.cardio.duration).trim(), lvl = String(exd.cardio.level).trim();
+      if (d || lvl) entries.push({ exerciseId: exd.exId, name: exd.name, type: 'cardio', swappedFrom: exd.swappedFrom, note: joinNotes(exd.note), sets: [{ duration: +d || null, level: +lvl || null }] });
       continue;
     }
     const skipLines = exd.sets.map((s, i) => s.skipped ? `Set ${i + 1} skipped: ${s.skipReason || ''}` : null).filter(Boolean);
@@ -484,6 +489,26 @@ function renderProgress(v) {
   const rangeTxt = range.end ? `${fmtDate(range.start)} – ${fmtDate(range.end)}` : `${fmtDate(range.start)} – now`;
   const bSessions = state.sessions.filter(s => s.blockId === block.id);
   const blockVol = bSessions.reduce((a, s) => a + sessionVolume(s), 0);
+
+  // VOLUME = working sets per muscle group this block (cardio excluded)
+  const muscleMap = {};
+  const addMuscleSets = (exId, n) => {
+    const ex = exById(exId); if (!ex || ex.type === 'cardio') return;
+    const k = muscleKey(ex.muscle) || 'unassigned';
+    (muscleMap[k] = muscleMap[k] || { label: muscleLabel(ex.muscle), sets: 0 }).sets += n;
+  };
+  bSessions.forEach(s => s.entries.forEach(e => {
+    if (e.skipped || e.type === 'cardio') return;
+    if (e.type === 'superset') (e.components || []).forEach(c => addMuscleSets(c.exerciseId, (c.sets || []).length));
+    else addMuscleSets(e.exerciseId, (e.sets || []).length);
+  }));
+  const muscleData = Object.values(muscleMap).sort((a, b) => b.sets - a.sets);
+  const muscleMax = Math.max(1, ...muscleData.map(m => m.sets));
+  const muscleRows = muscleData.map(m => `<div class="msc-row">
+      <span class="msc-name">${esc(m.label)}</span>
+      <span class="msc-bar"><span class="msc-fill" style="width:${Math.round(m.sets / muscleMax * 100)}%"></span></span>
+      <span class="msc-val">${m.sets}</span></div>`).join('') || `<div class="empty small">No sets logged in this block yet.</div>`;
+  const totalSets = muscleData.reduce((a, m) => a + m.sets, 0);
 
   // volume per 8-day cycle WITHIN this block
   const cyMap = {};
@@ -538,19 +563,22 @@ function renderProgress(v) {
     </button>
 
     <div class="stat-grid" style="margin:14px 0 22px">
-      <div class="stat"><div class="k">Block volume</div><div class="v">${Math.round(blockVol).toLocaleString()}</div><div class="d muted">${unit()}</div></div>
+      <div class="stat"><div class="k">Total sets</div><div class="v">${totalSets}</div><div class="d muted">this block</div></div>
       <div class="stat"><div class="k">Sessions</div><div class="v">${bSessions.length}</div><div class="d muted">this block</div></div>
-      <div class="stat"><div class="k">Cycles</div><div class="v">${cyIdxs.length}</div><div class="d muted">8-day</div></div>
+      <div class="stat"><div class="k">Tonnage</div><div class="v">${Math.round(blockVol).toLocaleString()}</div><div class="d muted">${unit()}</div></div>
       <div class="stat"><div class="k">PRs</div><div class="v">${prBlock.length}</div><div class="d muted">this block</div></div>
     </div>
 
-    <div class="section"><div class="section-head"><h2>Volume per 8-day cycle</h2></div>
+    <div class="section"><div class="section-head"><h2>Sets per muscle group</h2><span class="chip">this block</span></div>
+      <div class="card">${muscleRows}</div></div>
+
+    <div class="section"><div class="section-head"><h2>Tonnage per 8-day cycle</h2></div>
       <div class="card">${barChart(cycleBars)}</div></div>
 
     ${prBlock.length ? `<div class="section"><div class="section-head"><h2>PRs this block</h2></div>
       <div class="card"><div class="stack">${prBlock.map(p => `<div class="pr-row">🏆 ${p}</div>`).join('')}</div></div></div>` : ''}
 
-    ${state.blocks.length > 1 ? `<div class="section"><div class="section-head"><h2>Volume by block</h2></div>
+    ${state.blocks.length > 1 ? `<div class="section"><div class="section-head"><h2>Tonnage by block</h2></div>
       <div class="card">${barChart(blockVols)}</div></div>` : ''}
 
     <div class="section"><div class="section-head"><h2>Per-exercise progress</h2><span class="chip">all-time</span></div>
@@ -579,7 +607,7 @@ function renderExerciseDetail(v) {
         ${isPR ? '<span class="pr-badge">★ PR</span>' : ''}
       </div>
       <div class="muted small" style="margin-top:4px">${esc(setsTxt)}</div>
-      <div class="faint small" style="margin-top:2px">Top ${Math.round(x.topWeight)} ${unit()} · e1RM ${Math.round(x.best1rm)} · vol ${Math.round(x.volume).toLocaleString()}</div>
+      <div class="faint small" style="margin-top:2px">Top ${Math.round(x.topWeight)} ${unit()} · e1RM ${Math.round(x.best1rm)} · tonnage ${Math.round(x.volume).toLocaleString()}</div>
     </div>`;
   }).join('');
 
@@ -590,11 +618,11 @@ function renderExerciseDetail(v) {
     <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:22px">
       <div class="stat"><div class="k">Heaviest</div><div class="v">${Math.round(pr.topWeight)}</div><div class="d muted">${unit()}</div></div>
       <div class="stat"><div class="k">Best e1RM</div><div class="v">${Math.round(pr.best1rm)}</div><div class="d muted">${unit()}</div></div>
-      <div class="stat"><div class="k">Best volume</div><div class="v">${Math.round(pr.bestVolume).toLocaleString()}</div><div class="d muted">1 session</div></div>
+      <div class="stat"><div class="k">Best tonnage</div><div class="v">${Math.round(pr.bestVolume).toLocaleString()}</div><div class="d muted">1 session</div></div>
     </div>
     <div class="section"><div class="section-head"><h2>Top set over time (${unit()})</h2></div>
       <div class="card">${lineChart(weightPts)}</div></div>
-    <div class="section"><div class="section-head"><h2>Volume per session</h2></div>
+    <div class="section"><div class="section-head"><h2>Tonnage per session</h2></div>
       <div class="card">${barChart(volPts)}</div></div>
     <div class="section"><div class="section-head"><h2>Log</h2></div><div class="stack">${histRows}</div></div>
     `}`;
@@ -650,12 +678,18 @@ function renderBuild(v) {
       <span class="tile-chev">›</span></button>`;
   }).join('') || `<div class="empty small">No workouts in this block yet.</div>`;
 
-  const exList = state.exercises.map(e => `
-    <button class="tile" data-action="edit-exercise" data-id="${e.id}">
+  // exercise library grouped by muscle group (preset order first, then custom, then Unassigned)
+  const groups = {};
+  state.exercises.forEach(e => { const k = muscleKey(e.muscle) || 'unassigned'; (groups[k] = groups[k] || { label: muscleLabel(e.muscle), items: [] }).items.push(e); });
+  const orderIdx = k => { const i = MUSCLE_PRESETS.findIndex(m => muscleKey(m) === k); return i === -1 ? (k === 'unassigned' ? 999 : 500) : i; };
+  const exList = Object.keys(groups).sort((a, b) => orderIdx(a) - orderIdx(b) || a.localeCompare(b)).map(k => {
+    const g = groups[k];
+    const tiles = g.items.map(e => `<button class="tile" data-action="edit-exercise" data-id="${e.id}">
       <span class="emoji-badge">${e.type === 'cardio' ? '🏃' : '🏋️'}</span>
-      <span class="grow"><span class="tile-title">${esc(e.name)}</span>
-        <span class="tile-sub">${esc(e.muscle || '—')} · ${e.type}</span></span>
-      <span class="tile-chev">›</span></button>`).join('') || `<div class="empty small">No exercises yet.</div>`;
+      <span class="grow"><span class="tile-title">${esc(e.name)}</span><span class="tile-sub">${e.type}</span></span>
+      <span class="tile-chev">›</span></button>`).join('');
+    return `<div class="muscle-group"><div class="muscle-group-h">${esc(g.label)} · ${g.items.length}</div><div class="list">${tiles}</div></div>`;
+  }).join('') || `<div class="empty small">No exercises yet.</div>`;
 
   v.innerHTML = `
     <h1 class="page-title">Build</h1>
@@ -666,8 +700,8 @@ function renderBuild(v) {
     </div>
     <div class="section">
       <div class="section-head"><h2>Exercise library</h2><button class="btn sm" data-action="new-exercise">+ Add</button></div>
-      <p class="faint small" style="margin:-4px 2px 10px">Shared across all blocks.</p>
-      <div class="list">${exList}</div>
+      <p class="faint small" style="margin:-4px 2px 10px">Shared across all blocks, grouped by muscle.</p>
+      ${exList}
     </div>`;
 }
 
@@ -801,7 +835,7 @@ function lineChart(points, { h = 150 } = {}) {
 }
 
 function barChart(bars, { h = 150 } = {}) {
-  if (!bars.length || bars.every(b => !b.value)) return `<div class="empty small">No volume logged yet.</div>`;
+  if (!bars.length || bars.every(b => !b.value)) return `<div class="empty small">No data logged yet.</div>`;
   const W = 320, H = h, pad = { l: 30, r: 8, t: 10, b: 20 };
   const xs = (W - pad.l - pad.r), ys = (H - pad.t - pad.b);
   const max = Math.max(...bars.map(b => b.value), 1);
@@ -863,7 +897,9 @@ function exerciseForm(ex) {
         <button data-v="lifting" class="${ex.type === 'lifting' ? 'on' : ''}">Lifting</button>
         <button data-v="cardio" class="${ex.type === 'cardio' ? 'on' : ''}">Cardio</button>
       </div></label>
-    <label class="field"><span class="lbl">Muscle / group (optional)</span><input type="text" data-ef="muscle" value="${esc(ex.muscle || '')}" placeholder="e.g. Chest" /></label>
+    <label class="field"><span class="lbl">Muscle group</span>
+      <input type="text" data-ef="muscle" list="muscle-groups" value="${esc(ex.muscle || '')}" placeholder="pick or type" autocomplete="off" />
+      <datalist id="muscle-groups">${MUSCLE_PRESETS.map(m => `<option value="${m}"></option>`).join('')}</datalist></label>
     <button class="btn primary block" data-action="save-exercise" style="margin-top:6px">${editing ? 'Save' : 'Add exercise'}</button>
     ${editing ? `<button class="btn danger block" data-action="del-exercise" data-id="${ex.id}" style="margin-top:10px">Delete exercise</button>` : ''}`);
 }
@@ -880,7 +916,7 @@ function sessionDetailSheet(id) {
     }
     const isCardio = e.type === 'cardio';
     const line = e.skipped ? '⤫ Skipped'
-      : isCardio ? (e.sets[0] ? `${e.sets[0].duration ?? '–'} min · ${e.sets[0].distance ?? '–'} km` : '')
+      : isCardio ? (e.sets[0] ? `${e.sets[0].duration ?? '–'} min${e.sets[0].level != null ? ` · level ${e.sets[0].level}` : ''}${e.sets[0].distance != null ? ` · ${e.sets[0].distance} km` : ''}` : '')
       : e.sets.map(st => `${st.weight}×${st.reps}${st.rir ? ` @${st.rir}RIR` : ''}`).join('   ');
     const fbs = (isCardio || e.skipped) ? [] : e.sets.map((st, i) => st.fb ? `<div class="faint small">💬 set ${i + 1}: ${esc(st.fb)}</div>` : '').filter(Boolean);
     return `<div class="card" style="padding:11px 13px${e.skipped ? ';opacity:.7' : ''}"><strong>${esc(e.name || (exById(e.exerciseId) || {}).name || '?')}</strong>
@@ -891,7 +927,7 @@ function sessionDetailSheet(id) {
   }).join('');
   openSheet(fmtDateFull(s.date), `<div class="stack">${body}</div>
     ${s.note ? `<p class="muted small" style="margin-top:12px">📝 ${esc(s.note)}</p>` : ''}
-    <div class="faint small" style="margin-top:12px">Total volume: ${Math.round(sessionVolume(s)).toLocaleString()} ${unit()}</div>
+    <div class="faint small" style="margin-top:12px">Total tonnage: ${Math.round(sessionVolume(s)).toLocaleString()} ${unit()}</div>
     <button class="btn danger block" data-action="del-session" data-id="${s.id}" style="margin-top:14px">Delete session</button>`);
 }
 
