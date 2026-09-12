@@ -56,19 +56,19 @@ function defaults() {
     activeBlockId: block.id,
     workouts: [
       { id: uid(), name: 'Push', blockId: block.id, items: [
-        { exerciseId: ex.bench.id, sets: 4 },
-        { exerciseId: ex.ohp.id, sets: 3 },
-        { exerciseId: ex.incline.id, sets: 3 },
-        { exerciseId: ex.pushd.id, sets: 3 },
+        { exerciseId: ex.bench.id, sets: 4, rest: 120 },
+        { exerciseId: ex.ohp.id, sets: 3, rest: 120 },
+        { exerciseId: ex.incline.id, sets: 3, rest: 90 },
+        { exerciseId: ex.pushd.id, sets: 3, rest: 60 },
       ]},
       { id: uid(), name: 'Pull', blockId: block.id, items: [
-        { exerciseId: ex.dead.id, sets: 3 },
-        { exerciseId: ex.row.id, sets: 4 },
-        { exerciseId: ex.pull.id, sets: 3 },
-        { exerciseId: ex.curl.id, sets: 3 },
+        { exerciseId: ex.dead.id, sets: 3, rest: 180 },
+        { exerciseId: ex.row.id, sets: 4, rest: 120 },
+        { exerciseId: ex.pull.id, sets: 3, rest: 90 },
+        { exerciseId: ex.curl.id, sets: 3, rest: 60 },
       ]},
       { id: uid(), name: 'Legs', blockId: block.id, items: [
-        { exerciseId: ex.squat.id, sets: 4 },
+        { exerciseId: ex.squat.id, sets: 4, rest: 180 },
       ]},
     ],
     sessions: [],
@@ -98,6 +98,8 @@ function load() {
     }
     s.workouts.forEach(w => { if (!w.blockId) w.blockId = s.activeBlockId; });
     s.sessions.forEach(se => { if (!se.blockId) se.blockId = s.activeBlockId; });
+    // backfill a default rest so the count-up timer works on older/sample workouts that never set one
+    s.workouts.forEach(w => (w.items || []).forEach(it => { if (it.exerciseId && it.rest === undefined) it.rest = 90; }));
     return s;
   } catch (e) {
     console.warn('load failed, using defaults', e);
@@ -1035,11 +1037,14 @@ $$('.tab').forEach(t => t.addEventListener('click', () => {
 // Auto-start the rest timer when you tap OUT of a set's reps field (whether or not you changed it).
 document.addEventListener('focusout', e => {
   const t = e.target;
-  if (!(t && t.matches && t.matches('input[data-f=reps]') && route._draft)) return;
-  const exd = route._draft.exercises[+t.dataset.xi];
-  if (!exd) return;
-  if (exd.type === 'superset') { const c = exd.components[+t.dataset.ci]; if (c) startRestFor(c.name, c.rest); }
-  else startRestFor(exd.name, exd.rest);
+  if (!t || !t.matches || !route._draft) return;
+  if (t.dataset && t.dataset.xi !== undefined) persistDraft();   // flush autosave on any field blur
+  if (t.matches('input[data-f=reps]')) {                          // reps blur → start rest timer
+    const exd = route._draft.exercises[+t.dataset.xi];
+    if (!exd) return;
+    if (exd.type === 'superset') { const c = exd.components[+t.dataset.ci]; if (c) startRestFor(c.name, c.rest); }
+    else startRestFor(exd.name, exd.rest);
+  }
 });
 
 document.addEventListener('click', e => {

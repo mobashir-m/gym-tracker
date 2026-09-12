@@ -1,5 +1,6 @@
-/* Service worker: offline app-shell cache. Bump CACHE to force update. */
-const CACHE = 'gym-v2';
+/* Service worker: NETWORK-FIRST so a redeploy always reaches the device when online;
+   the cache is only an offline fallback (gym works with no signal). */
+const CACHE = 'gym-v3';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg'];
 
 self.addEventListener('install', e => {
@@ -20,11 +21,12 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
   // Never intercept cross-origin (e.g. GitHub API) — let it hit the network.
   if (url.origin !== location.origin) return;
+  // Network-first: fresh when online, cached copy when offline.
   e.respondWith(
-    caches.match(req).then(cached => cached || fetch(req).then(res => {
+    fetch(req).then(res => {
       const copy = res.clone();
       caches.open(CACHE).then(c => c.put(req, copy));
       return res;
-    }).catch(() => cached))
+    }).catch(() => caches.match(req))
   );
 });
