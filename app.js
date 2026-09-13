@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.12-d';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.13-a';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -347,9 +347,18 @@ function renderSession(v) {
   if (!route._draft || route._draft.workoutId !== w.id) route._draft = resumableDraft(w.id) || buildDraft(w);
   const draft = route._draft;
 
-  const noteBtn = (xi, on) => `<button class="icon-btn ${on ? 'on' : ''}" data-action="toggle-ex-note" data-xi="${xi}" title="Note" aria-label="note">📝</button>`;
+  const noteBtn = (xi, on) => `<button class="icon-btn ${on ? 'on' : ''}" data-action="toggle-ex-note" data-xi="${xi}" title="Notes" aria-label="notes">📝</button>`;
   const menuBtn = (xi) => `<button class="icon-btn" data-action="ex-menu" data-xi="${xi}" title="Swap or skip" aria-label="more">⋯</button>`;
   const noteField = (xi, val) => `<div class="ex-note-field" ${val ? '' : 'hidden'}><input data-xi="${xi}" data-fnote="1" value="${esc(val)}" placeholder="Note to future you — e.g. try a wider grip next time" /></div>`;
+  // read-only cues shown while logging: pinned (sticks) + the note you left last time "for today"
+  const exCues = (ex) => `${ex && ex.pinnedNote ? `<div class="pin-note">📌 ${esc(ex.pinnedNote).replace(/\n/g, ' · ')}</div>` : ''}${ex && ex.nextNote ? `<div class="next-note">⏭ For today: ${esc(ex.nextNote).replace(/\n/g, ' · ')}</div>` : ''}`;
+  // edit panel toggled by 📝: pinned (permanent) + a fresh note for next time (option A — one-shot, consumed after the session)
+  const notePanel = (xi, ex, exd) => `<div class="ex-note-panel" hidden>
+      <label class="note-line"><span>📌 Pinned <em>every session</em></span>
+        <input data-xi="${xi}" data-fpin="1" value="${esc((ex && ex.pinnedNote) || '')}" placeholder="e.g. elbows tucked" /></label>
+      <label class="note-line"><span>⏭ For next time <em>shows once</em></span>
+        <input data-xi="${xi}" data-fnote="1" value="${esc(exd.note || '')}" placeholder="e.g. add 2.5 kg" /></label>
+    </div>`;
   const tags = (exd) => `${exd.swappedFrom ? `<span class="mini-tag">↔ swapped from ${esc(exd.swappedFrom)}</span>` : ''}${exd.added ? `<span class="mini-tag added">＋ added today</span>` : ''}`;
 
   const blocks = draft.exercises.map((exd, xi) => {
@@ -384,19 +393,19 @@ function renderSession(v) {
       </div>`;
     }
     if (exd.type === 'cardio') {
+      const ex = exById(exd.exId);
       return `<div class="ex-block" data-xi="${xi}">
         <div class="ex-block-head"><span class="name">${esc(exd.name)}</span>
-          <div class="ex-actions"><span class="chip">cardio</span>${noteBtn(xi, exd.note)}${menuBtn(xi)}</div></div>
-        ${tags(exd)}${noteField(xi, exd.note)}
+          <div class="ex-actions"><span class="chip">cardio</span>${noteBtn(xi, (ex && (ex.pinnedNote || ex.nextNote)) || exd.note)}${menuBtn(xi)}</div></div>
+        ${tags(exd)}${exCues(ex)}${notePanel(xi, ex, exd)}
         <div class="set-row cardio">
           <input inputmode="decimal" data-xi="${xi}" data-fc="duration" value="${exd.cardio.duration}" placeholder="min" />
           <input inputmode="decimal" data-xi="${xi}" data-fc="level" value="${exd.cardio.level}" placeholder="level" />
         </div>
       </div>`;
     }
-    // Numbers are already prefilled into the inputs, so the top box only carries a note (if any).
-    const le = lastEntryForExercise(exd.exId, draft.date);
-    const lastNote = (le && le.note) ? `<div class="last-note">📝 ${esc(le.note).replace(/\n/g, ' · ')}</div>` : '';
+    // Numbers are already prefilled into the inputs; the top box carries pinned + "for today" cues.
+    const ex = exById(exd.exId);
     const rows = exd.sets.map((st, si) => `<div class="set-row ${st.skipped ? 'skipped' : ''}">
         <button class="setno" data-action="skip-set" data-xi="${xi}" data-si="${si}" title="${st.skipped ? 'Tap to restore' : 'Tap to skip'}">${st.skipped ? '⤫' : si + 1}</button>
         <input inputmode="decimal" data-xi="${xi}" data-si="${si}" data-f="weight" value="${st.weight}" placeholder="${unit()}" ${st.skipped ? 'disabled' : ''} />
@@ -406,9 +415,8 @@ function renderSession(v) {
       </div>`).join('');
     return `<div class="ex-block" data-xi="${xi}">
       <div class="ex-block-head"><span class="name">${esc(exd.name)}</span>
-        <div class="ex-actions">${noteBtn(xi, exd.note)}${menuBtn(xi)}</div></div>
-      ${tags(exd)}${noteField(xi, exd.note)}
-      ${lastNote}
+        <div class="ex-actions">${noteBtn(xi, (ex && (ex.pinnedNote || ex.nextNote)) || exd.note)}${menuBtn(xi)}</div></div>
+      ${tags(exd)}${exCues(ex)}${notePanel(xi, ex, exd)}
       <div class="mini-head"><span></span><span>weight (${unit()})</span><span>reps</span><span>RIR</span></div>
       ${rows}
     </div>`;
@@ -743,9 +751,16 @@ function renderWorkoutEditor(v) {
           <button data-action="move-item" data-idx="${idx}" data-dir="1" ${idx === w.items.length - 1 ? 'disabled' : ''}>▼</button>
         </div>
         <span class="grow"><strong>${esc(ex.name)}</strong><div class="faint small">${esc(ex.muscle || '')}</div></span>
+        <button class="icon-btn ${(ex.pinnedNote || ex.nextNote) ? 'on' : ''}" data-action="toggle-ex-note" title="Notes" aria-label="notes">📝</button>
         <button class="btn ghost icon" data-action="remove-item" data-idx="${idx}" style="color:var(--danger)">✕</button>
       </div>
-      ${ctls}</div>`;
+      ${ctls}
+      <div class="ex-note-panel" hidden>
+        <label class="note-line"><span>📌 Pinned <em>every session</em></span>
+          <input data-action="ex-pinned" data-exid="${ex.id}" value="${esc(ex.pinnedNote || '')}" placeholder="e.g. elbows tucked" /></label>
+        <label class="note-line"><span>⏭ Next session <em>shows once</em></span>
+          <input data-action="ex-next" data-exid="${ex.id}" value="${esc(ex.nextNote || '')}" placeholder="e.g. add 2.5 kg" /></label>
+      </div></div>`;
   }).join('') || `<div class="empty small">No exercises in this workout yet.</div>`;
 
   v.innerHTML = `
@@ -900,6 +915,10 @@ function exerciseForm(ex) {
     <label class="field"><span class="lbl">Muscle group</span>
       <input type="text" data-ef="muscle" list="muscle-groups" value="${esc(ex.muscle || '')}" placeholder="pick or type" autocomplete="off" />
       <datalist id="muscle-groups">${MUSCLE_PRESETS.map(m => `<option value="${m}"></option>`).join('')}</datalist></label>
+    <label class="field"><span class="lbl">📌 Pinned note <em class="lbl-hint">— shows every session</em></span>
+      <input type="text" data-ef="pinned" value="${esc(ex.pinnedNote || '')}" placeholder="e.g. elbows tucked, wide grip" /></label>
+    <label class="field"><span class="lbl">⏭ Note for next session <em class="lbl-hint">— shows once, then clears</em></span>
+      <input type="text" data-ef="next" value="${esc(ex.nextNote || '')}" placeholder="e.g. add 2.5 kg / beat 8 reps" /></label>
     <button class="btn primary block" data-action="save-exercise" style="margin-top:6px">${editing ? 'Save' : 'Add exercise'}</button>
     ${editing ? `<button class="btn danger block" data-action="del-exercise" data-id="${ex.id}" style="margin-top:10px">Delete exercise</button>` : ''}`);
 }
@@ -1124,8 +1143,9 @@ document.addEventListener('click', e => {
     /* train */
     case 'open-workout': route = { tab: 'train', workoutId: id, _draft: resumableDraft(id) || buildDraft(woById(id)) }; return render();
     case 'toggle-ex-note': {
-      const f = $('.ex-note-field', btn.closest('.ex-block'));
-      if (f) { f.hidden = !f.hidden; if (!f.hidden) $('input', f).focus(); }
+      const box = btn.closest('.ex-block');
+      const f = $('.ex-note-panel', box) || $('.ex-note-field', box);
+      if (f) { f.hidden = !f.hidden; if (!f.hidden) { const i = $('input', f); if (i) i.focus(); } }
       return;
     }
     case 'skip-set': {
@@ -1184,6 +1204,11 @@ document.addEventListener('click', e => {
     case 'save-session': {
       const sess = collectSession();
       if (!sess.entries.length) return toast('Nothing logged yet');
+      // Option A — the "next session" note is one-shot: whatever you leave now becomes next time's nudge,
+      // and last time's is consumed (cleared if you left nothing). Pinned notes are untouched.
+      (route._draft?.exercises || []).forEach(exd => {
+        if (exd.exId) { const ex = exById(exd.exId); if (ex) ex.nextNote = (exd.note || '').trim(); }
+      });
       state.sessions.push(sess); save();
       clearRest(); clearDraft();          // logged for real now — drop the rest timer + autosave
       route = { tab: 'progress' }; render();
@@ -1285,8 +1310,10 @@ document.addEventListener('click', e => {
       const exId = $('[data-ef=id]', sheet).value;
       const type = $('[data-action=ef-type] .on', sheet)?.dataset.v || 'lifting';
       const muscle = $('[data-ef=muscle]', sheet).value.trim();
-      if (exId) { const ex = exById(exId); Object.assign(ex, { name, type, muscle }); }
-      else state.exercises.push({ id: uid(), name, type, muscle });
+      const pinnedNote = ($('[data-ef=pinned]', sheet)?.value || '').trim();
+      const nextNote = ($('[data-ef=next]', sheet)?.value || '').trim();
+      if (exId) { const ex = exById(exId); Object.assign(ex, { name, type, muscle, pinnedNote, nextNote }); }
+      else state.exercises.push({ id: uid(), name, type, muscle, pinnedNote, nextNote });
       save(); closeSheet(); return render();
     }
     case 'del-exercise': {
@@ -1328,10 +1355,14 @@ document.addEventListener('input', e => {
   const t = e.target;
   if (t.matches('[data-action=workout-name]')) { woById(route.workoutId).name = t.value; save(); return; }
   if (t.matches('[data-action=block-name]')) { const b = activeBlock(); if (b) { b.name = t.value; save(); } return; }
+  // per-exercise notes edited from the Build workout editor (permanent, live on the exercise itself)
+  if (t.matches('[data-action=ex-pinned]')) { const ex = exById(t.dataset.exid); if (ex) { ex.pinnedNote = t.value; save(); } return; }
+  if (t.matches('[data-action=ex-next]'))   { const ex = exById(t.dataset.exid); if (ex) { ex.nextNote = t.value; save(); } return; }
   // live-session draft fields — autosaved to localStorage so nothing is lost mid-workout
   if (route._draft && t.dataset.xi !== undefined) {
     const exd = route._draft.exercises[+t.dataset.xi];
     if (!exd) return;
+    if (t.dataset.fpin) { const ex = exById(exd.exId); if (ex) { ex.pinnedNote = t.value; save(); } return; }  // pinned note lives on the exercise, not the draft
     if (t.dataset.fnote) exd.note = t.value;
     else if (t.dataset.fc) exd.cardio[t.dataset.fc] = t.value;
     else if (t.dataset.ci !== undefined && t.dataset.si !== undefined) exd.components[+t.dataset.ci].sets[+t.dataset.si][t.dataset.f] = t.value;
