@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.13-a';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.13-b';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -349,7 +349,6 @@ function renderSession(v) {
 
   const noteBtn = (xi, on) => `<button class="icon-btn ${on ? 'on' : ''}" data-action="toggle-ex-note" data-xi="${xi}" title="Notes" aria-label="notes">📝</button>`;
   const menuBtn = (xi) => `<button class="icon-btn" data-action="ex-menu" data-xi="${xi}" title="Swap or skip" aria-label="more">⋯</button>`;
-  const noteField = (xi, val) => `<div class="ex-note-field" ${val ? '' : 'hidden'}><input data-xi="${xi}" data-fnote="1" value="${esc(val)}" placeholder="Note to future you — e.g. try a wider grip next time" /></div>`;
   // read-only cues shown while logging: pinned (sticks) + the note you left last time "for today"
   const exCues = (ex) => `${ex && ex.pinnedNote ? `<div class="pin-note">📌 ${esc(ex.pinnedNote).replace(/\n/g, ' · ')}</div>` : ''}${ex && ex.nextNote ? `<div class="next-note">⏭ For today: ${esc(ex.nextNote).replace(/\n/g, ' · ')}</div>` : ''}`;
   // edit panel toggled by 📝: pinned (permanent) + a fresh note for next time (option A — one-shot, consumed after the session)
@@ -383,10 +382,11 @@ function renderSession(v) {
         </div>`;
       }).join('');
       const restBadges = exd.components.map(c => `${esc(c.name)} ${restLabel(c.rest)}`).join('　·　');
+      const ss = ssById(exd.supersetId);
       return `<div class="ex-block superset" data-xi="${xi}">
         <div class="ex-block-head"><span class="name">🔗 ${esc(exd.name)}</span>
-          <div class="ex-actions">${noteBtn(xi, exd.note)}${menuBtn(xi)}</div></div>
-        ${tags(exd)}${noteField(xi, exd.note)}
+          <div class="ex-actions">${noteBtn(xi, (ss && (ss.pinnedNote || ss.nextNote)) || exd.note)}${menuBtn(xi)}</div></div>
+        ${tags(exd)}${exCues(ss)}${notePanel(xi, ss, exd)}
         <div class="ss-legend">rest → ${restBadges}</div>
         <div class="ss-head"><span></span><span>weight (${unit()})</span><span>reps</span><span>RIR</span></div>
         ${rounds}
@@ -991,7 +991,8 @@ function exerciseMenu(xi) {
 /* ---------------- superset builder (Build) ---------------- */
 function supersetBuilder(existingId) {
   const ss = existingId ? ssById(existingId) : null;
-  route._ssb = { id: existingId || null, components: ss ? JSON.parse(JSON.stringify(ss.components)) : [] };
+  route._ssb = { id: existingId || null, components: ss ? JSON.parse(JSON.stringify(ss.components)) : [],
+    pinnedNote: ss ? (ss.pinnedNote || '') : '', nextNote: ss ? (ss.nextNote || '') : '' };
   renderSupersetBuilder();
 }
 function renderSupersetBuilder() {
@@ -1007,10 +1008,17 @@ function renderSupersetBuilder() {
   const back = openSheet(ssb.id ? 'Edit superset' : 'New superset', `
     <div class="stack">${rows}</div>
     <button class="btn block" data-action="ssb-add" style="margin-top:12px">＋ Add a move</button>
-    <button class="btn primary block" data-action="ssb-save" style="margin-top:14px" ${ssb.components.length < 2 ? 'disabled' : ''}>${ssb.id ? 'Save superset' : 'Create superset'}</button>
+    <label class="field" style="margin-top:14px"><span class="lbl">📌 Pinned note <em class="lbl-hint">— shows every session</em></span>
+      <input type="text" data-ssb-pin value="${esc(ssb.pinnedNote || '')}" placeholder="e.g. keep rest tight between moves" /></label>
+    <label class="field"><span class="lbl">⏭ Note for next session <em class="lbl-hint">— shows once, then clears</em></span>
+      <input type="text" data-ssb-next value="${esc(ssb.nextNote || '')}" placeholder="e.g. add a round / bump curl weight" /></label>
+    <button class="btn primary block" data-action="ssb-save" style="margin-top:6px" ${ssb.components.length < 2 ? 'disabled' : ''}>${ssb.id ? 'Save superset' : 'Create superset'}</button>
     <p class="faint small center" style="margin-top:8px">Rest = the pause after each move as you cycle. Set rounds after.</p>`);
   $$('[data-ssb-rest]', back).forEach(sel => sel.addEventListener('change', () => { route._ssb.components[+sel.dataset.ssbRest].rest = +sel.value; }));
   $$('[data-ssb-remove]', back).forEach(b => b.addEventListener('click', () => { route._ssb.components.splice(+b.dataset.ssbRemove, 1); renderSupersetBuilder(); }));
+  const pinI = $('[data-ssb-pin]', back), nextI = $('[data-ssb-next]', back);
+  if (pinI) pinI.addEventListener('input', () => { route._ssb.pinnedNote = pinI.value; });
+  if (nextI) nextI.addEventListener('input', () => { route._ssb.nextNote = nextI.value; });
 }
 
 /* ---------------- blocks (mesocycles) ---------------- */
@@ -1207,7 +1215,8 @@ document.addEventListener('click', e => {
       // Option A — the "next session" note is one-shot: whatever you leave now becomes next time's nudge,
       // and last time's is consumed (cleared if you left nothing). Pinned notes are untouched.
       (route._draft?.exercises || []).forEach(exd => {
-        if (exd.exId) { const ex = exById(exd.exId); if (ex) ex.nextNote = (exd.note || '').trim(); }
+        const tgt = exd.exId ? exById(exd.exId) : (exd.supersetId ? ssById(exd.supersetId) : null);
+        if (tgt) tgt.nextNote = (exd.note || '').trim();
       });
       state.sessions.push(sess); save();
       clearRest(); clearDraft();          // logged for real now — drop the rest timer + autosave
@@ -1283,9 +1292,10 @@ document.addEventListener('click', e => {
       const ssb = route._ssb;
       if (!ssb || ssb.components.length < 2) return toast('Add at least 2 moves');
       const name = ssb.components.map(c => (exById(c.exerciseId) || {}).name).filter(Boolean).join(' + ');
-      if (ssb.id) { const ss = ssById(ssb.id); ss.components = ssb.components; ss.name = name; }
+      const pinnedNote = (ssb.pinnedNote || '').trim(), nextNote = (ssb.nextNote || '').trim();
+      if (ssb.id) { const ss = ssById(ssb.id); ss.components = ssb.components; ss.name = name; ss.pinnedNote = pinnedNote; ss.nextNote = nextNote; }
       else {
-        const ss = { id: uid(), name, components: ssb.components };
+        const ss = { id: uid(), name, components: ssb.components, pinnedNote, nextNote };
         state.supersets.push(ss);
         woById(route.workoutId).items.push({ supersetId: ss.id, sets: 3 });
       }
@@ -1362,7 +1372,7 @@ document.addEventListener('input', e => {
   if (route._draft && t.dataset.xi !== undefined) {
     const exd = route._draft.exercises[+t.dataset.xi];
     if (!exd) return;
-    if (t.dataset.fpin) { const ex = exById(exd.exId); if (ex) { ex.pinnedNote = t.value; save(); } return; }  // pinned note lives on the exercise, not the draft
+    if (t.dataset.fpin) { const tgt = exd.exId ? exById(exd.exId) : (exd.supersetId ? ssById(exd.supersetId) : null); if (tgt) { tgt.pinnedNote = t.value; save(); } return; }  // pinned note lives on the exercise/superset, not the draft
     if (t.dataset.fnote) exd.note = t.value;
     else if (t.dataset.fc) exd.cardio[t.dataset.fc] = t.value;
     else if (t.dataset.ci !== undefined && t.dataset.si !== undefined) exd.components[+t.dataset.ci].sets[+t.dataset.si][t.dataset.f] = t.value;
