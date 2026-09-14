@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.13-b';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.14-a';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -25,6 +25,12 @@ const fmtDateFull = s => parseYmd(s).toLocaleDateString(undefined, { weekday: 's
 /* ---------- state ---------- */
 let state = load();
 let route = { tab: 'train' };
+// Cloud sync bookkeeping: `planUpdatedAt` marks when the PLAN (exercises/workouts/blocks/settings) last changed,
+// so merges can keep the newest plan while always combining sessions. lastPlanSig detects plan edits in save().
+let lastPlanSig = planSig();
+let applyingRemote = false;   // true while we adopt cloud data, so it doesn't echo back as a push
+let syncing = false;          // guards against overlapping syncs
+let lastSyncAt = 0;
 // Persist on first boot so workout IDs are stable (keeps autosaved drafts resumable even for a brand-new user).
 try { if (!localStorage.getItem(STORE_KEY)) save(); } catch (e) {}
 
@@ -46,6 +52,7 @@ function defaults() {
   const block = { id: uid(), name: 'Block 1', startDate: start };
   return {
     version: 1,
+    planUpdatedAt: Date.now(),
     settings: {
       units: 'kg',
       cycleStartDate: start,
@@ -110,8 +117,18 @@ function load() {
   }
 }
 
+// A signature of just the PLAN (everything except sessions + the local-only github token).
+// When it changes, the plan was edited, so we stamp planUpdatedAt — that's how a merge knows whose plan is newest.
+function planSig() {
+  const { github, ...s } = (state.settings || {});
+  return JSON.stringify([state.exercises, state.workouts, state.supersets, state.blocks, state.activeBlockId, s]);
+}
 function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+  try {
+    const sig = planSig();
+    if (sig !== lastPlanSig) { state.planUpdatedAt = Date.now(); lastPlanSig = sig; }
+    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  }
   catch (e) { toast('⚠️ Could not save locally'); console.error(e); }
   maybeAutoPush();
 }
@@ -798,7 +815,7 @@ function renderSettings(v) {
     <div class="section">
       <div class="section-head"><h2>GitHub sync</h2><span class="chip ${g.token && g.owner ? 'accent' : ''}">${g.token && g.owner ? 'configured' : 'off'}</span></div>
       <div class="card stack">
-        <p class="muted small" style="margin:0 2px 4px">Syncs your data to a <b>private</b> repo so it follows you across devices. Create a fine-grained token (repo → Contents: Read &amp; Write) and paste it below — it stays on this device only.</p>
+        <p class="muted small" style="margin:0 2px 4px">Syncs your data to a <b>private</b> repo so it follows you across devices — <b>automatically</b> when you open the app and after every change. Create a fine-grained token (repo → Contents: Read &amp; Write) and paste it below — it stays on this device only.</p>
         <div class="row"><label class="field" style="flex:1"><span class="lbl">Owner (user)</span><input type="text" data-g="owner" value="${esc(g.owner)}" placeholder="your-github-user"/></label>
           <label class="field" style="flex:1"><span class="lbl">Repo</span><input type="text" data-g="repo" value="${esc(g.repo)}" placeholder="gym-data"/></label></div>
         <div class="row"><label class="field" style="flex:1"><span class="lbl">Your name (file)</span><input type="text" data-g="user" value="${esc(g.user)}" placeholder="mobashir"/></label>
@@ -806,9 +823,9 @@ function renderSettings(v) {
         <label class="field"><span class="lbl">Fine-grained token</span><input type="password" data-g="token" value="${esc(g.token)}" placeholder="github_pat_…"/></label>
         <div class="row wrap">
           <button class="btn sm" data-action="gh-save">Save config</button>
-          <button class="btn sm primary" data-action="gh-push">⬆ Push to cloud</button>
-          <button class="btn sm" data-action="gh-pull">⬇ Pull from cloud</button>
+          <button class="btn sm primary" data-action="gh-pull">🔄 Sync now</button>
         </div>
+        <p class="faint small" style="margin:2px">Sync happens on its own — this button just forces it right now.</p>
         <div id="gh-status" class="faint small"></div>
       </div>
     </div>
@@ -1222,7 +1239,7 @@ document.addEventListener('click', e => {
       clearRest(); clearDraft();          // logged for real now — drop the rest timer + autosave
       route = { tab: 'progress' }; render();
       // Push to GitHub right now so it never gets forgotten.
-      if (ghConfigured()) { toast('☁️ Saving to GitHub…'); ghPush(); }
+      if (ghConfigured()) { toast('☁️ Saving to GitHub…'); ghSync(); }
       else toast('✅ Workout saved');
       return;
     }
@@ -1343,8 +1360,8 @@ document.addEventListener('click', e => {
     }
     /* settings: github */
     case 'gh-save': { readGithubInputs(); save(); return toast('Config saved'); }
-    case 'gh-push': { readGithubInputs(); save(); return ghPush(); }
-    case 'gh-pull': { readGithubInputs(); save(); return ghPull(); }
+    case 'gh-push': { readGithubInputs(); save(); return ghSync(); }
+    case 'gh-pull': { readGithubInputs(); save(); return ghSync(); }
   }
 });
 
@@ -1453,7 +1470,7 @@ function b64decode(b64) { return decodeURIComponent(escape(atob(b64))); }
 
 function syncPayload() {
   const { github, ...settings } = state.settings; // never push the token
-  return { version: state.version, settings, exercises: state.exercises, workouts: state.workouts,
+  return { version: state.version, planUpdatedAt: state.planUpdatedAt || 0, settings, exercises: state.exercises, workouts: state.workouts,
     sessions: state.sessions, supersets: state.supersets, blocks: state.blocks, activeBlockId: state.activeBlockId };
 }
 
@@ -1467,60 +1484,114 @@ async function ghGetSha() {
   } catch (e) { throw e; }
 }
 
-async function ghPush() {
-  clearTimeout(autoPushTimer); // an explicit push cancels any pending debounced one
-  if (!ghConfigured()) { ghStatus('⚠️ Fill owner, repo, name and token first.'); return; }
-  ghStatus('Pushing…');
-  try {
-    const { sha } = await ghGetSha();
-    const g = state.settings.github;
-    const body = {
-      message: `gym sync ${new Date().toISOString()}`,
-      content: b64encode(JSON.stringify(syncPayload(), null, 2)),
-      branch: g.branch || 'main',
-    };
-    if (sha) body.sha = sha;
-    const res = await fetch(`https://api.github.com/repos/${g.owner}/${g.repo}/contents/${ghPath()}`, {
-      method: 'PUT', headers: ghHeaders(), body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error('PUT ' + res.status + ' — ' + (await res.text()).slice(0, 120));
-    ghStatus('✅ Pushed ' + new Date().toLocaleTimeString());
-    toast('☁️ Synced');
-  } catch (e) { ghStatus('❌ ' + e.message); toast('Sync failed'); }
+// Write the current state to the cloud (optionally with the sha we already fetched, to avoid a second GET).
+async function ghPut(sha) {
+  const g = state.settings.github;
+  const body = {
+    message: `gym sync ${new Date().toISOString()}`,
+    content: b64encode(JSON.stringify(syncPayload(), null, 2)),
+    branch: g.branch || 'main',
+  };
+  if (sha) body.sha = sha;
+  const res = await fetch(`https://api.github.com/repos/${g.owner}/${g.repo}/contents/${ghPath()}`, {
+    method: 'PUT', headers: ghHeaders(), body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error('PUT ' + res.status + ' — ' + (await res.text()).slice(0, 120));
 }
 
-async function ghPull() {
-  if (!ghConfigured()) { ghStatus('⚠️ Fill owner, repo, name and token first.'); return; }
-  ghStatus('Pulling…');
-  try {
-    const { json } = await ghGetSha();
-    if (!json) { ghStatus('No cloud file yet — push first.'); return; }
-    const gh = state.settings.github;
-    state = Object.assign({}, json);
-    state.settings = Object.assign({}, defaults().settings, json.settings || {}, { github: gh });
-    // heal fields that older cloud data may lack
-    state.exercises = state.exercises || []; state.workouts = state.workouts || [];
-    state.sessions = state.sessions || []; state.supersets = state.supersets || [];
-    state.blocks = state.blocks || [];
-    if (!state.blocks.length) state.blocks = [{ id: uid(), name: 'Block 1', startDate: state.settings.cycleStartDate || todayStr() }];
-    if (!state.activeBlockId || !state.blocks.some(b => b.id === state.activeBlockId)) state.activeBlockId = state.blocks[state.blocks.length - 1].id;
-    state.workouts.forEach(w => { if (!w.blockId) w.blockId = state.activeBlockId; });
-    state.sessions.forEach(se => { if (!se.blockId) se.blockId = state.activeBlockId; });
-    save(); render(); ghStatus('✅ Pulled ' + new Date().toLocaleTimeString()); toast('☁️ Pulled latest');
-  } catch (e) { ghStatus('❌ ' + e.message); toast('Pull failed'); }
+// Combine two copies WITHOUT losing anything:
+//  • sessions → union by id (the cloud's, plus any this device added) — logs are never dropped
+//  • plan (exercises/workouts/supersets/blocks/settings) → taken from whichever side edited it most recently
+// On a tie the cloud wins, so a device that hasn't touched its plan can never overwrite a fresh one.
+function mergeStates(local, remote) {
+  const seen = new Set(), sessions = [];
+  (remote.sessions || []).forEach(s => { if (s && s.id && !seen.has(s.id)) { seen.add(s.id); sessions.push(s); } });
+  (local.sessions || []).forEach(s => { if (s && s.id && !seen.has(s.id)) { seen.add(s.id); sessions.push(s); } });
+  sessions.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const localPU = local.planUpdatedAt || 0, remotePU = remote.planUpdatedAt || 0;
+  const plan = localPU > remotePU ? local : remote;   // strict — tie favours the cloud
+  const merged = {
+    version: local.version || remote.version || 1,
+    planUpdatedAt: Math.max(localPU, remotePU),
+    settings: Object.assign({}, defaults().settings, plan.settings || {}, { github: local.settings.github }),
+    exercises: plan.exercises || [],
+    workouts: plan.workouts || [],
+    supersets: plan.supersets || [],
+    blocks: plan.blocks || [],
+    activeBlockId: plan.activeBlockId,
+    sessions,
+  };
+  // heal, same as load()
+  if (!merged.blocks.length) merged.blocks = [{ id: uid(), name: 'Block 1', startDate: merged.settings.cycleStartDate || todayStr() }];
+  if (!merged.activeBlockId || !merged.blocks.some(b => b.id === merged.activeBlockId)) merged.activeBlockId = merged.blocks[merged.blocks.length - 1].id;
+  merged.workouts.forEach(w => { if (!w.blockId) w.blockId = merged.activeBlockId; });
+  merged.sessions.forEach(se => { if (!se.blockId) se.blockId = merged.activeBlockId; });
+  return merged;
 }
 
+// The one sync primitive: pull the cloud, merge, adopt locally, and push back only if we added something.
+// Used on app open, on returning to the app, and (debounced) after any change — so devices stay in step by themselves.
+async function ghSync() {
+  if (!ghConfigured()) { ghStatus('⚠️ Fill owner, repo, name and token first.'); return; }
+  if (!navigator.onLine) { ghStatus('Offline — will sync when back online.'); return; }
+  if (syncing) return;
+  syncing = true; clearTimeout(autoPushTimer);
+  ghStatus('Syncing…');
+  try {
+    const { sha, json } = await ghGetSha();
+    if (!json) {                       // nothing in the cloud yet — seed it with what we have
+      await ghPut(sha);
+      lastSyncAt = Date.now(); ghStatus('✅ Synced ' + new Date().toLocaleTimeString());
+      return;
+    }
+    // does this device have anything the cloud lacks? (new sessions, or a newer plan)
+    const remoteIds = new Set((json.sessions || []).map(s => s.id));
+    const localAddsSessions = (state.sessions || []).some(s => !remoteIds.has(s.id));
+    const localPlanNewer = (state.planUpdatedAt || 0) > (json.planUpdatedAt || 0);
+
+    const merged = mergeStates(state, json);
+    applyingRemote = true;
+    state = merged;
+    lastPlanSig = planSig();          // keep the signature in step so save() doesn't re-stamp planUpdatedAt
+    save();                           // persist the merged copy locally
+    applyingRemote = false;
+    render();
+
+    if (localAddsSessions || localPlanNewer) await ghPut(sha);   // give the cloud our contribution
+    lastSyncAt = Date.now();
+    ghStatus('✅ Synced ' + new Date().toLocaleTimeString());
+  } catch (e) {
+    ghStatus('❌ ' + e.message);
+  } finally {
+    applyingRemote = false; syncing = false;
+  }
+}
+
+// Don't yank the plan out from under an in-progress workout; sync at other times.
+function activeWorkoutOpen() { return route.tab === 'train' && !!route.workoutId; }
 let autoPushTimer;
 function maybeAutoPush() {
+  if (applyingRemote) return;                 // we're adopting cloud data — don't bounce it straight back
+  if (activeWorkoutOpen()) return;            // never sync mid-workout; it flushes on Finish & Save
   if (!ghConfigured() || !navigator.onLine) return;
   clearTimeout(autoPushTimer);
-  autoPushTimer = setTimeout(() => { ghPush().catch(() => {}); }, 4000); // debounce
+  autoPushTimer = setTimeout(() => { ghSync().catch(() => {}); }, 4000); // debounce → safe merge sync
+}
+function autoSyncSoon() {
+  if (!ghConfigured() || !navigator.onLine || syncing || activeWorkoutOpen()) return;
+  if (Date.now() - lastSyncAt < 3000) return;  // light throttle for rapid focus changes
+  ghSync().catch(() => {});
 }
 
 /* ============================================================
    BOOT
    ============================================================ */
 render();
+// Auto-sync so every device stays current on its own: on open, on reconnect, and when you return to the app.
+autoSyncSoon();
+window.addEventListener('online', autoSyncSoon);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) autoSyncSoon(); });
 
 const IS_DEV = ['localhost', '127.0.0.1'].includes(location.hostname);
 if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !IS_DEV) {
