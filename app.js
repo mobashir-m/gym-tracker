@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.14-a';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.14-b';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -1532,6 +1532,7 @@ function mergeStates(local, remote) {
 
 // The one sync primitive: pull the cloud, merge, adopt locally, and push back only if we added something.
 // Used on app open, on returning to the app, and (debounced) after any change — so devices stay in step by themselves.
+// If two devices write at once, GitHub rejects the stale one with 409/422 — we just re-fetch, re-merge and retry.
 async function ghSync() {
   if (!ghConfigured()) { ghStatus('⚠️ Fill owner, repo, name and token first.'); return; }
   if (!navigator.onLine) { ghStatus('Offline — will sync when back online.'); return; }
@@ -1539,26 +1540,30 @@ async function ghSync() {
   syncing = true; clearTimeout(autoPushTimer);
   ghStatus('Syncing…');
   try {
-    const { sha, json } = await ghGetSha();
-    if (!json) {                       // nothing in the cloud yet — seed it with what we have
-      await ghPut(sha);
-      lastSyncAt = Date.now(); ghStatus('✅ Synced ' + new Date().toLocaleTimeString());
-      return;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const { sha, json } = await ghGetSha();   // fresh sha every attempt — that's what fixes the 409
+      if (!json) { await ghPut(sha); break; }   // nothing in the cloud yet — seed it
+
+      // does this device have anything the cloud lacks? (new sessions, or a newer plan)
+      const remoteIds = new Set((json.sessions || []).map(s => s.id));
+      const localAddsSessions = (state.sessions || []).some(s => !remoteIds.has(s.id));
+      const localPlanNewer = (state.planUpdatedAt || 0) > (json.planUpdatedAt || 0);
+
+      const merged = mergeStates(state, json);
+      applyingRemote = true;
+      state = merged;
+      lastPlanSig = planSig();        // keep the signature in step so save() doesn't re-stamp planUpdatedAt
+      save();                         // persist the merged copy locally
+      applyingRemote = false;
+      render();
+
+      if (!(localAddsSessions || localPlanNewer)) break;   // cloud already has everything → done
+      try { await ghPut(sha); break; }                     // give the cloud our contribution
+      catch (e) {
+        if (attempt < 4 && /\b(409|422)\b/.test(e.message)) { await new Promise(r => setTimeout(r, 400 * (attempt + 1))); continue; }
+        throw e;                                            // not a conflict (or out of retries) → report it
+      }
     }
-    // does this device have anything the cloud lacks? (new sessions, or a newer plan)
-    const remoteIds = new Set((json.sessions || []).map(s => s.id));
-    const localAddsSessions = (state.sessions || []).some(s => !remoteIds.has(s.id));
-    const localPlanNewer = (state.planUpdatedAt || 0) > (json.planUpdatedAt || 0);
-
-    const merged = mergeStates(state, json);
-    applyingRemote = true;
-    state = merged;
-    lastPlanSig = planSig();          // keep the signature in step so save() doesn't re-stamp planUpdatedAt
-    save();                           // persist the merged copy locally
-    applyingRemote = false;
-    render();
-
-    if (localAddsSessions || localPlanNewer) await ghPut(sha);   // give the cloud our contribution
     lastSyncAt = Date.now();
     ghStatus('✅ Synced ' + new Date().toLocaleTimeString());
   } catch (e) {
