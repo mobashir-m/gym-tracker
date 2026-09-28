@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.14-b';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.28-a';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -307,19 +307,79 @@ const fmtClock = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padSta
 const REST_OPTS = [0, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240, 300];
 const restLabel = s => s ? fmtClock(s) : 'Off';
 
+/* ---------- suggestions: last time's numbers shown as grey hints, never pre-typed ----------
+   A box only holds a value once you type it, or once you "accept" the set by tapping its reps box and
+   leaving — then every empty box takes its hint (flagged `auto`, so tapping it again acts like a hint:
+   type to replace, nothing to delete). A weight you TYPE becomes the hint for the sets after it. */
+const hasVal = v => v !== '' && v !== null && v !== undefined;
+const vv = v => (v === undefined || v === null) ? '' : v;
+function lastRow(lastSets, i) {
+  if (!lastSets || !lastSets.length) return null;
+  const lp = lastSets[i] || lastSets[lastSets.length - 1];   // more sets than last time → reuse last time's final set
+  return { weight: lp.weight ?? '', reps: lp.reps ?? '', rir: lp.rir ?? 0 };
+}
+const blankSet = (lastSets, i) => ({ weight: '', reps: '', rir: '', last: lastRow(lastSets, i), auto: {} });
+// Hint for one box. Weight → the latest earlier set whose weight you typed today, else last time's.
+// Reps / RIR → last time's number for this set (the target to beat).
+function suggest(sets, i, f, isSkippedAt) {
+  if (f === 'weight') {
+    for (let j = i - 1; j >= 0; j--) {
+      const p = sets[j];
+      if (!p || p.skipped || (isSkippedAt && isSkippedAt(j))) continue;
+      if (hasVal(p.weight) && !(p.auto && p.auto.weight)) return String(p.weight);
+    }
+  }
+  const l = sets[i] && sets[i].last;
+  return l && hasVal(l[f]) ? String(l[f]) : '';
+}
+const setTouched = s => !!s && (hasVal(s.weight) || hasVal(s.reps) || hasVal(s.rir));
+// Accept a set: each empty box takes its hint. False when there's nothing to accept (no reps typed, no reps hint).
+function acceptSet(sets, i, isSkippedAt) {
+  const s = sets[i];
+  if (!s || s.skipped || (isSkippedAt && isSkippedAt(i))) return false;
+  if (!hasVal(s.reps) && !suggest(sets, i, 'reps', isSkippedAt)) return false;
+  s.auto = s.auto || {};
+  ['weight', 'reps', 'rir'].forEach(f => {
+    if (hasVal(s[f])) return;
+    const v = suggest(sets, i, f, isSkippedAt) || (f === 'rir' ? '0' : '');
+    if (hasVal(v)) { s[f] = v; s.auto[f] = true; }
+  });
+  return true;
+}
+// What gets saved for a set you touched: your numbers, and the hint for any box you left empty.
+function finalSet(s, hint) {
+  const v = f => hasVal(s[f]) ? s[f] : (hint(f) || (f === 'rir' ? 0 : ''));
+  return { weight: +v('weight') || 0, reps: +v('reps') || 0, rir: +v('rir') || 0 };
+}
+// Cardio: last time's time + level (cardio entries aren't in exerciseSetsHistory, so look them up directly).
+function lastCardioFor(exId, beforeDate) {
+  for (const s of sessionsSorted()) {
+    if (beforeDate && !(s.date < beforeDate)) continue;
+    const e = s.entries.find(en => en.exerciseId === exId && en.type === 'cardio' && !en.skipped && en.sets && en.sets.length);
+    if (e) return e.sets[0];
+  }
+  return null;
+}
+function acceptCardio(c) {
+  if (!c) return false;
+  const l = c.last || {};
+  if (!hasVal(c.duration) && !hasVal(c.level) && !hasVal(l.duration) && !hasVal(l.level)) return false;
+  c.auto = c.auto || {};
+  ['duration', 'level'].forEach(f => { if (!hasVal(c[f]) && hasVal(l[f])) { c[f] = String(l[f]); c.auto[f] = true; } });
+  return true;
+}
+
 function draftSetsFor(exId, n, date) {
   const last = lastSetsForExercise(exId, date);
-  return Array.from({ length: n }, (_, i) => {
-    const lp = last && last[i] ? last[i] : null;
-    return { weight: lp ? lp.weight : '', reps: lp ? lp.reps : '', rir: lp ? (lp.rir ?? 0) : 0 };
-  });
+  return Array.from({ length: n }, (_, i) => blankSet(last, i));
 }
 // Build one draft exercise (used by buildDraft, swap, and add-exercise). nOverride fixes the set count (Build plan); otherwise use last session's count, else 3.
 function draftExercise(exId, date, nOverride) {
   const ex = exById(exId);
   if (ex.type === 'cardio') {
-    const lp = (lastSetsForExercise(exId, date) || [])[0] || {};
-    return { exId, name: ex.name, type: 'cardio', note: '', cardio: { duration: lp.duration ?? '', level: lp.level ?? '' } };
+    const lp = lastCardioFor(exId, date);
+    return { exId, name: ex.name, type: 'cardio', note: '',
+      cardio: { duration: '', level: '', last: lp ? { duration: lp.duration ?? '', level: lp.level ?? '' } : null, auto: {} } };
   }
   const le = lastEntryForExercise(exId, date);
   const n = nOverride || (le ? le.sets.length : 3) || 3;
@@ -328,11 +388,7 @@ function draftExercise(exId, date, nOverride) {
 function supersetSetsFor(supersetId, exerciseId, rounds, date) {
   const le = lastSupersetEntry(supersetId, date);
   const comp = le && (le.components || []).find(c => c.exerciseId === exerciseId);
-  const lastSets = comp ? comp.sets : null;
-  return Array.from({ length: rounds }, (_, i) => {
-    const lp = lastSets && lastSets[i] ? lastSets[i] : null;
-    return { weight: lp ? lp.weight : '', reps: lp ? lp.reps : '', rir: lp ? (lp.rir ?? 0) : 0 };
-  });
+  return Array.from({ length: rounds }, (_, i) => blankSet(comp ? comp.sets : null, i));
 }
 function draftSuperset(ss, rounds, date) {
   const components = (ss.components || []).map(c => {
@@ -386,16 +442,19 @@ function renderSession(v) {
       </div>`;
     }
     if (exd.type === 'superset') {
+      const isSk = r => exd.skippedRounds && exd.skippedRounds[r] != null;
       const rounds = Array.from({ length: exd.rounds }, (_, r) => {
         const skReason = exd.skippedRounds && exd.skippedRounds[r];
         return `<div class="ss-round ${skReason ? 'skipped' : ''}">
           <button class="ss-round-h" data-action="skip-ss-round" data-xi="${xi}" data-round="${r}" title="${skReason ? 'Tap to restore' : 'Tap to skip this round'}">${skReason ? '⤫ ' : ''}Round ${r + 1}</button>
-          ${skReason ? `<div class="skip-line">⤫ skipped — ${esc(skReason)}</div>` : exd.components.map((c, ci) => `<div class="ss-move">
+          ${skReason ? `<div class="skip-line">⤫ skipped — ${esc(skReason)}</div>` : exd.components.map((c, ci) => {
+            const s = c.sets[r], h = f => esc(suggest(c.sets, r, f, isSk));
+            return `<div class="ss-move ${setTouched(s) ? 'done' : ''}">
             <span class="ss-name" title="${esc(c.name)}">${esc(c.name)}</span>
-            <input inputmode="decimal" data-xi="${xi}" data-ci="${ci}" data-si="${r}" data-f="weight" value="${c.sets[r].weight}" placeholder="${unit()}" />
-            <input inputmode="numeric" data-xi="${xi}" data-ci="${ci}" data-si="${r}" data-f="reps" value="${c.sets[r].reps}" placeholder="reps" />
-            <input inputmode="numeric" class="rir" data-xi="${xi}" data-ci="${ci}" data-si="${r}" data-f="rir" value="${c.sets[r].rir}" placeholder="0" />
-          </div>`).join('')}
+            <input inputmode="decimal" data-xi="${xi}" data-ci="${ci}" data-si="${r}" data-f="weight" value="${esc(vv(s.weight))}" placeholder="${h('weight') || unit()}" />
+            <input inputmode="numeric" data-xi="${xi}" data-ci="${ci}" data-si="${r}" data-f="reps" value="${esc(vv(s.reps))}" placeholder="${h('reps') || 'reps'}" />
+            <input inputmode="numeric" class="rir" data-xi="${xi}" data-ci="${ci}" data-si="${r}" data-f="rir" value="${esc(vv(s.rir))}" placeholder="${h('rir') || '0'}" />
+          </div>`; }).join('')}
         </div>`;
       }).join('');
       const restBadges = exd.components.map(c => `${esc(c.name)} ${restLabel(c.rest)}`).join('　·　');
@@ -416,20 +475,20 @@ function renderSession(v) {
           <div class="ex-actions"><span class="chip">cardio</span>${noteBtn(xi, (ex && (ex.pinnedNote || ex.nextNote)) || exd.note)}${menuBtn(xi)}</div></div>
         ${tags(exd)}${exCues(ex)}${notePanel(xi, ex, exd)}
         <div class="set-row cardio">
-          <input inputmode="decimal" data-xi="${xi}" data-fc="duration" value="${exd.cardio.duration}" placeholder="min" />
-          <input inputmode="decimal" data-xi="${xi}" data-fc="level" value="${exd.cardio.level}" placeholder="level" />
+          <input inputmode="decimal" data-xi="${xi}" data-fc="duration" value="${esc(vv(exd.cardio.duration))}" placeholder="${exd.cardio.last && hasVal(exd.cardio.last.duration) ? esc(exd.cardio.last.duration) : 'min'}" />
+          <input inputmode="decimal" data-xi="${xi}" data-fc="level" value="${esc(vv(exd.cardio.level))}" placeholder="${exd.cardio.last && hasVal(exd.cardio.last.level) ? esc(exd.cardio.last.level) : 'level'}" />
         </div>
       </div>`;
     }
-    // Numbers are already prefilled into the inputs; the top box carries pinned + "for today" cues.
+    // Last time's numbers show as grey hints (placeholders) — boxes stay empty until you type or accept.
     const ex = exById(exd.exId);
-    const rows = exd.sets.map((st, si) => `<div class="set-row ${st.skipped ? 'skipped' : ''}">
+    const rows = exd.sets.map((st, si) => { const h = f => esc(suggest(exd.sets, si, f)); return `<div class="set-row ${st.skipped ? 'skipped' : ''} ${!st.skipped && setTouched(st) ? 'done' : ''}">
         <button class="setno" data-action="skip-set" data-xi="${xi}" data-si="${si}" title="${st.skipped ? 'Tap to restore' : 'Tap to skip'}">${st.skipped ? '⤫' : si + 1}</button>
-        <input inputmode="decimal" data-xi="${xi}" data-si="${si}" data-f="weight" value="${st.weight}" placeholder="${unit()}" ${st.skipped ? 'disabled' : ''} />
-        <input inputmode="numeric" data-xi="${xi}" data-si="${si}" data-f="reps" value="${st.reps}" placeholder="reps" ${st.skipped ? 'disabled' : ''} />
-        <input inputmode="numeric" class="rir" data-xi="${xi}" data-si="${si}" data-f="rir" value="${st.rir}" placeholder="0" ${st.skipped ? 'disabled' : ''} />
+        <input inputmode="decimal" data-xi="${xi}" data-si="${si}" data-f="weight" value="${esc(vv(st.weight))}" placeholder="${h('weight') || unit()}" ${st.skipped ? 'disabled' : ''} />
+        <input inputmode="numeric" data-xi="${xi}" data-si="${si}" data-f="reps" value="${esc(vv(st.reps))}" placeholder="${h('reps') || 'reps'}" ${st.skipped ? 'disabled' : ''} />
+        <input inputmode="numeric" class="rir" data-xi="${xi}" data-si="${si}" data-f="rir" value="${esc(vv(st.rir))}" placeholder="${h('rir') || '0'}" ${st.skipped ? 'disabled' : ''} />
         ${st.skipped ? `<div class="skip-line">⤫ skipped — ${esc(st.skipReason || '')}</div>` : ''}
-      </div>`).join('');
+      </div>`; }).join('');
     return `<div class="ex-block" data-xi="${xi}">
       <div class="ex-block-head"><span class="name">${esc(exd.name)}</span>
         <div class="ex-actions">${noteBtn(xi, (ex && (ex.pinnedNote || ex.nextNote)) || exd.note)}${menuBtn(xi)}</div></div>
@@ -467,14 +526,18 @@ function collectSession() {
         continue;
       }
       const sk = exd.skippedRounds || {};
+      const isSk = ri => sk[ri] != null;
       const components = exd.components.map(c => ({
         exerciseId: c.exerciseId, name: c.name,
-        sets: c.sets.filter((s, ri) => sk[ri] == null && (String(s.weight).trim() !== '' || String(s.reps).trim() !== ''))
-          .map(s => ({ weight: +s.weight || 0, reps: +s.reps || 0, rir: +s.rir || 0 }))
+        sets: c.sets.map((s, ri) => ({ s, ri }))
+          .filter(({ s, ri }) => !isSk(ri) && !s.skipped && setTouched(s))
+          .map(({ s, ri }) => finalSet(s, f => suggest(c.sets, ri, f, isSk)))
       })).filter(c => c.sets.length);
       const roundSkips = Object.keys(sk).sort((a, b) => a - b).map(ri => `Round ${+ri + 1} skipped: ${sk[ri]}`);
-      const note = joinNotes(exd.note, ...roundSkips);
-      if (components.length || roundSkips.length) entries.push({ supersetId: exd.supersetId, name: exd.name, type: 'superset', note, components });
+      const moveSkips = [];
+      exd.components.forEach(c => c.sets.forEach((s, ri) => { if (s.skipped && !isSk(ri)) moveSkips.push(`Round ${ri + 1} · ${c.name} skipped: ${s.skipReason || ''}`); }));
+      const note = joinNotes(exd.note, ...roundSkips, ...moveSkips);
+      if (components.length || roundSkips.length || moveSkips.length) entries.push({ supersetId: exd.supersetId, name: exd.name, type: 'superset', note, components });
       continue;
     }
     const ex = exById(exd.exId);
@@ -485,19 +548,179 @@ function collectSession() {
       continue;
     }
     if (exd.type === 'cardio') {
-      const d = String(exd.cardio.duration).trim(), lvl = String(exd.cardio.level).trim();
+      const c = exd.cardio || {}, l = c.last || {};
+      const touched = hasVal(c.duration) || hasVal(c.level);
+      const val = f => hasVal(c[f]) ? c[f] : (touched && hasVal(l[f]) ? l[f] : '');   // an empty box keeps last time's
+      const d = String(val('duration')).trim(), lvl = String(val('level')).trim();
       if (d || lvl) entries.push({ exerciseId: exd.exId, name: exd.name, type: 'cardio', swappedFrom: exd.swappedFrom, note: joinNotes(exd.note), sets: [{ duration: +d || null, level: +lvl || null }] });
       continue;
     }
     const skipLines = exd.sets.map((s, i) => s.skipped ? `Set ${i + 1} skipped: ${s.skipReason || ''}` : null).filter(Boolean);
-    const sets = exd.sets
-      .filter(s => !s.skipped && (String(s.weight).trim() !== '' || String(s.reps).trim() !== ''))
-      .map(s => ({ weight: +s.weight || 0, reps: +s.reps || 0, rir: +s.rir || 0 }));
+    const sets = exd.sets.map((s, i) => ({ s, i }))
+      .filter(({ s }) => !s.skipped && setTouched(s))
+      .map(({ s, i }) => finalSet(s, f => suggest(exd.sets, i, f)));
     if (sets.length || skipLines.length) {
       entries.push({ exerciseId: exd.exId, name: exd.name, type: 'lifting', swappedFrom: exd.swappedFrom, note: joinNotes(exd.note, ...skipLines), sets });
     }
   }
   return { id: uid(), workoutId: w.id, workoutName: w.name, blockId: w.blockId || state.activeBlockId, date: draft.date, entries };
+}
+
+/* ---------- live-logging helpers (hints, accept, untouched sets) ---------- */
+// Which draft object/field an input box edits: a lifting set, a superset move-round, or the cardio box.
+function draftFieldRef(t) {
+  const exd = route._draft && route._draft.exercises[+t.dataset.xi];
+  if (!exd) return null;
+  if (t.dataset.fc) return exd.cardio ? { obj: exd.cardio, f: t.dataset.fc } : null;
+  if (!t.dataset.f || t.dataset.si === undefined) return null;
+  if (t.dataset.ci !== undefined) { const c = exd.components && exd.components[+t.dataset.ci]; return c && c.sets[+t.dataset.si] ? { obj: c.sets[+t.dataset.si], f: t.dataset.f } : null; }
+  return exd.sets && exd.sets[+t.dataset.si] ? { obj: exd.sets[+t.dataset.si], f: t.dataset.f } : null;
+}
+// Refresh one exercise's boxes in place (values, hints, done marks) — no re-render, so the keyboard/focus
+// stay put while you move between boxes. The box you're typing in is never touched.
+function paintExercise(xi) {
+  const exd = route._draft && route._draft.exercises[xi];
+  if (!exd || exd.skipped) return;
+  const put = (sel, val, ph) => { const el = document.querySelector(sel); if (el && el !== document.activeElement) { el.value = vv(val); el.placeholder = ph; } return el; };
+  if (exd.type === 'cardio') {
+    const c = exd.cardio || {}, l = c.last || {};
+    put(`input[data-xi="${xi}"][data-fc="duration"]`, c.duration, hasVal(l.duration) ? String(l.duration) : 'min');
+    put(`input[data-xi="${xi}"][data-fc="level"]`, c.level, hasVal(l.level) ? String(l.level) : 'level');
+    return;
+  }
+  if (exd.type === 'superset') {
+    const isSk = r => exd.skippedRounds && exd.skippedRounds[r] != null;
+    exd.components.forEach((c, ci) => c.sets.forEach((s, r) => {
+      if (isSk(r)) return;
+      const sel = f => `input[data-xi="${xi}"][data-ci="${ci}"][data-si="${r}"][data-f="${f}"]`;
+      const el = put(sel('weight'), s.weight, suggest(c.sets, r, 'weight', isSk) || unit());
+      put(sel('reps'), s.reps, suggest(c.sets, r, 'reps', isSk) || 'reps');
+      put(sel('rir'), s.rir, suggest(c.sets, r, 'rir', isSk) || '0');
+      const row = el && el.closest('.ss-move'); if (row) row.classList.toggle('done', setTouched(s));
+    }));
+    return;
+  }
+  (exd.sets || []).forEach((s, si) => {
+    if (s.skipped) return;
+    const sel = f => `input[data-xi="${xi}"][data-si="${si}"][data-f="${f}"]:not([data-ci])`;
+    const el = put(sel('weight'), s.weight, suggest(exd.sets, si, 'weight') || unit());
+    put(sel('reps'), s.reps, suggest(exd.sets, si, 'reps') || 'reps');
+    put(sel('rir'), s.rir, suggest(exd.sets, si, 'rir') || '0');
+    const row = el && el.closest('.set-row'); if (row) row.classList.toggle('done', setTouched(s));
+  });
+}
+// Did you log anything at all (numbers or a skip)? A fully untouched workout is just "nothing logged yet".
+function anythingLogged(draft) {
+  return draft.exercises.some(exd => {
+    if (exd.skipped) return true;
+    if (exd.type === 'cardio') { const c = exd.cardio || {}; return hasVal(c.duration) || hasVal(c.level); }
+    if (exd.type === 'superset') return Object.keys(exd.skippedRounds || {}).length > 0 || exd.components.some(c => c.sets.some(s => s.skipped || setTouched(s)));
+    return (exd.sets || []).some(s => s.skipped || setTouched(s));
+  });
+}
+// Sets you never touched (no numbers, not skipped) — they must be confirmed or skipped with a reason.
+function untouchedItems(draft) {
+  const out = [];
+  draft.exercises.forEach((exd, xi) => {
+    if (exd.skipped) return;
+    if (exd.type === 'cardio') {
+      const c = exd.cardio || {}, l = c.last || {};
+      if (!hasVal(c.duration) && !hasVal(c.level)) out.push({ xi, kind: 'cardio', fillable: hasVal(l.duration) || hasVal(l.level) });
+      return;
+    }
+    if (exd.type === 'superset') {
+      const isSk = r => exd.skippedRounds && exd.skippedRounds[r] != null;
+      exd.components.forEach((c, ci) => c.sets.forEach((s, r) => {
+        if (isSk(r) || s.skipped || setTouched(s)) return;
+        out.push({ xi, kind: 'move', ci, si: r, fillable: !!suggest(c.sets, r, 'reps', isSk) });
+      }));
+      return;
+    }
+    (exd.sets || []).forEach((s, si) => {
+      if (s.skipped || setTouched(s)) return;
+      out.push({ xi, kind: 'set', si, fillable: !!suggest(exd.sets, si, 'reps') });
+    });
+  });
+  return out;
+}
+function fillItem(draft, it) {
+  const exd = draft.exercises[it.xi];
+  if (it.kind === 'cardio') return acceptCardio(exd.cardio);
+  if (it.kind === 'move') return acceptSet(exd.components[it.ci].sets, it.si, r => exd.skippedRounds && exd.skippedRounds[r] != null);
+  return acceptSet(exd.sets, it.si);
+}
+// Skip every untouched set with one reason. Nothing done on an exercise → skip the whole exercise;
+// a whole superset round untouched → skip the round; otherwise just those sets/moves.
+function skipItems(draft, items, reason) {
+  const xis = [...new Set(items.map(it => it.xi))];
+  xis.forEach(xi => {
+    const exd = draft.exercises[xi];
+    if (exd.type === 'cardio') { exd.skipped = true; exd.skipReason = reason; return; }
+    if (exd.type === 'superset') {
+      const isSk = r => exd.skippedRounds && exd.skippedRounds[r] != null;
+      const nothing = !Object.keys(exd.skippedRounds || {}).length && exd.components.every(c => c.sets.every(s => !s.skipped && !setTouched(s)));
+      if (nothing) { exd.skipped = true; exd.skipReason = reason; return; }
+      exd.skippedRounds = exd.skippedRounds || {};
+      for (let r = 0; r < exd.rounds; r++) {
+        if (isSk(r)) continue;
+        const open = exd.components.filter(c => !c.sets[r].skipped && !setTouched(c.sets[r]));
+        if (open.length === exd.components.length) exd.skippedRounds[r] = reason;
+        else open.forEach(c => { c.sets[r].skipped = true; c.sets[r].skipReason = reason; });
+      }
+      return;
+    }
+    const nothing = exd.sets.every(s => !s.skipped && !setTouched(s));
+    if (nothing) { exd.skipped = true; exd.skipReason = reason; return; }
+    exd.sets.forEach(s => { if (!s.skipped && !setTouched(s)) { s.skipped = true; s.skipReason = reason; } });
+  });
+}
+// "Bench Press — sets 3, 4" / "Bench + Curl — rounds 1, 2" / "… — round 3 · Barbell Curl" (only part of a round missing)
+function untouchedLabel(draft, items) {
+  const groups = [];
+  items.forEach(it => {
+    const exd = draft.exercises[it.xi];
+    let g = groups.find(x => x.xi === it.xi);
+    if (!g) groups.push(g = { xi: it.xi, name: exd.name, sets: [], rounds: {} });
+    if (it.kind === 'set') g.sets.push(it.si + 1);
+    else if (it.kind === 'move') (g.rounds[it.si] = g.rounds[it.si] || []).push(exd.components[it.ci].name);
+  });
+  const many = (word, nums) => `${word}${nums.length > 1 ? 's' : ''} ${nums.join(', ')}`;
+  return groups.map(g => {
+    const exd = draft.exercises[g.xi], parts = [];
+    if (g.sets.length) parts.push(many('set', g.sets));
+    const rounds = Object.keys(g.rounds).sort((a, b) => a - b).map(r => ({ n: +r + 1, moves: g.rounds[r], whole: g.rounds[r].length === exd.components.length }));
+    if (rounds.length && rounds.every(x => x.whole)) parts.push(many('round', rounds.map(x => x.n)));   // "rounds 1, 2"
+    else rounds.forEach(x => parts.push(x.whole ? `round ${x.n}` : `round ${x.n} · ${x.moves.join(' + ')}`));   // in round order
+    return { xi: g.xi, name: g.name, parts };
+  });
+}
+function untouchedSheet(items) {
+  const n = items.length;
+  const lines = untouchedLabel(route._draft, items).map(g =>
+    `<div class="untouched-line"><strong>${esc(g.name)}</strong>${g.parts.length ? ` <span class="faint">— ${esc(g.parts.join(', '))}</span>` : ''}</div>`).join('');
+  openSheet(n === 1 ? '1 set has no numbers' : `${n} sets have no numbers`, `
+    <p class="muted small" style="margin:0 2px 10px">Did you do ${n === 1 ? 'it' : 'them'}?</p>
+    <div class="stack" style="margin-bottom:14px">${lines}</div>
+    <button class="btn primary block" data-action="untouched-fill">✓ Yes — use the suggested numbers</button>
+    <button class="btn block" data-action="untouched-skip" style="margin-top:8px">⤫ No — skip ${n === 1 ? 'it' : 'them'} (give a reason)</button>
+    <button class="btn ghost block" data-action="close-sheet" style="margin-top:8px">‹ Go back and fill ${n === 1 ? 'it' : 'them'} in</button>`);
+}
+// Log the workout for real (the old Finish & Save body).
+function finishSave() {
+  const sess = collectSession();
+  if (!sess.entries.length) return toast('Nothing logged yet');
+  // Option A — the "next session" note is one-shot: whatever you leave now becomes next time's nudge,
+  // and last time's is consumed (cleared if you left nothing). Pinned notes are untouched.
+  (route._draft?.exercises || []).forEach(exd => {
+    const tgt = exd.exId ? exById(exd.exId) : (exd.supersetId ? ssById(exd.supersetId) : null);
+    if (tgt) tgt.nextNote = (exd.note || '').trim();
+  });
+  state.sessions.push(sess); save();
+  clearRest(); clearDraft();          // logged for real now — drop the rest timer + autosave
+  route = { tab: 'progress' }; render();
+  // Push to GitHub right now so it never gets forgotten.
+  if (ghConfigured()) { toast('☁️ Saving to GitHub…'); ghSync(); }
+  else toast('✅ Workout saved');
 }
 
 /* ---------------- PROGRESS ---------------- */
@@ -1140,17 +1363,38 @@ $$('.tab').forEach(t => t.addEventListener('click', () => {
   render();
 }));
 
-// Auto-start the rest timer when you tap OUT of a set's reps field (whether or not you changed it).
+// Tapping a box that holds an ACCEPTED hint shows it as a hint again (empty box, grey number),
+// so you just type the new number — nothing to delete. Leaving without typing puts it back.
+document.addEventListener('focusin', e => {
+  const t = e.target;
+  if (!t || !t.matches || !route._draft || !t.matches('input[data-xi]')) return;
+  const ref = draftFieldRef(t);
+  if (ref && ref.obj.auto && ref.obj.auto[ref.f] && hasVal(ref.obj[ref.f])) { t.value = ''; t.placeholder = String(ref.obj[ref.f]); }
+});
+// Leaving a set's reps box = "this set is done": its empty boxes take the hints, and the rest timer starts.
+// (Same numbers as last time? Just tap reps and leave.)
 document.addEventListener('focusout', e => {
   const t = e.target;
-  if (!t || !t.matches || !route._draft) return;
-  if (t.dataset && t.dataset.xi !== undefined) persistDraft();   // flush autosave on any field blur
-  if (t.matches('input[data-f=reps]')) {                          // reps blur → start rest timer
-    const exd = route._draft.exercises[+t.dataset.xi];
-    if (!exd) return;
-    if (exd.type === 'superset') { const c = exd.components[+t.dataset.ci]; if (c) startRestFor(c.name, c.rest); }
-    else startRestFor(exd.name, exd.rest);
+  if (!t || !t.matches || !route._draft || !t.dataset || t.dataset.xi === undefined) return;
+  const xi = +t.dataset.xi, exd = route._draft.exercises[xi];
+  if (!exd) return;
+  const ref = draftFieldRef(t);
+  if (ref && ref.obj.auto && ref.obj.auto[ref.f] && t.value === '') t.value = vv(ref.obj[ref.f]);   // tapped an accepted hint, typed nothing
+  if (t.matches('input[data-f=reps]')) {
+    if (exd.type === 'superset') {
+      const c = exd.components[+t.dataset.ci];
+      const ok = c && acceptSet(c.sets, +t.dataset.si, r => exd.skippedRounds && exd.skippedRounds[r] != null);
+      paintExercise(xi);
+      if (ok) startRestFor(c.name, c.rest);
+    } else if (exd.sets) {
+      const ok = acceptSet(exd.sets, +t.dataset.si);
+      paintExercise(xi);
+      if (ok) startRestFor(exd.name, exd.rest);
+    }
+  } else if (t.dataset.fc && exd.cardio) {          // cardio: leaving a box keeps last time's for the other one
+    if (acceptCardio(exd.cardio)) paintExercise(xi);
   }
+  persistDraft();                                    // flush autosave on any field blur
 });
 
 document.addEventListener('click', e => {
@@ -1227,20 +1471,29 @@ document.addEventListener('click', e => {
     }
     case 'close-sheet': return closeSheet();
     case 'save-session': {
-      const sess = collectSession();
-      if (!sess.entries.length) return toast('Nothing logged yet');
-      // Option A — the "next session" note is one-shot: whatever you leave now becomes next time's nudge,
-      // and last time's is consumed (cleared if you left nothing). Pinned notes are untouched.
-      (route._draft?.exercises || []).forEach(exd => {
-        const tgt = exd.exId ? exById(exd.exId) : (exd.supersetId ? ssById(exd.supersetId) : null);
-        if (tgt) tgt.nextNote = (exd.note || '').trim();
-      });
-      state.sessions.push(sess); save();
-      clearRest(); clearDraft();          // logged for real now — drop the rest timer + autosave
-      route = { tab: 'progress' }; render();
-      // Push to GitHub right now so it never gets forgotten.
-      if (ghConfigured()) { toast('☁️ Saving to GitHub…'); ghSync(); }
-      else toast('✅ Workout saved');
+      const draft = route._draft;
+      if (!draft || !anythingLogged(draft)) return toast('Nothing logged yet');
+      const left = untouchedItems(draft);     // sets you never touched: confirm or skip them (keeps skipping honest)
+      if (left.length) return untouchedSheet(left);
+      return finishSave();
+    }
+    case 'untouched-fill': {                  // "yes, I did them" → take the suggested numbers
+      const draft = route._draft, left = untouchedItems(draft);
+      const stuck = left.filter(it => !it.fillable);
+      if (stuck.length) {
+        const g = untouchedLabel(draft, stuck)[0];
+        closeSheet();
+        return toast(`No history for ${g.name}${g.parts.length ? ' ' + g.parts[0] : ''} — type the numbers or skip it`);
+      }
+      left.forEach(it => fillItem(draft, it));
+      closeSheet(); return finishSave();
+    }
+    case 'untouched-skip': {                  // "no" → one reason, applied to every untouched set
+      const draft = route._draft, left = untouchedItems(draft);
+      reasonPrompt(left.length === 1 ? 'Why skip this set?' : `Why skip these ${left.length} sets?`,
+        ['Ran out of time', 'Fatigue', 'Injury / pain', 'Machine unavailable'], reason => {
+          skipItems(draft, left, reason); finishSave();
+        });
       return;
     }
     case 'discard-draft': {
@@ -1391,9 +1644,14 @@ document.addEventListener('input', e => {
     if (!exd) return;
     if (t.dataset.fpin) { const tgt = exd.exId ? exById(exd.exId) : (exd.supersetId ? ssById(exd.supersetId) : null); if (tgt) { tgt.pinnedNote = t.value; save(); } return; }  // pinned note lives on the exercise/superset, not the draft
     if (t.dataset.fnote) exd.note = t.value;
-    else if (t.dataset.fc) exd.cardio[t.dataset.fc] = t.value;
-    else if (t.dataset.ci !== undefined && t.dataset.si !== undefined) exd.components[+t.dataset.ci].sets[+t.dataset.si][t.dataset.f] = t.value;
-    else if (t.dataset.f && t.dataset.si !== undefined) exd.sets[+t.dataset.si][t.dataset.f] = t.value;
+    else {
+      const ref = draftFieldRef(t);
+      if (ref) {
+        ref.obj[ref.f] = t.value;
+        if (ref.obj.auto) delete ref.obj.auto[ref.f];   // you typed it → it's your number, not a hint
+        paintExercise(+t.dataset.xi);                     // later sets' weight hints follow what you type; done marks update
+      }
+    }
     persistDraftSoon();
   }
 });

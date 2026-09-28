@@ -173,6 +173,11 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-app
 .set-row input { padding: 11px 8px; text-align: center; }
 .set-row input.rir { color: var(--text-dim); }
 .set-row input:disabled { opacity: .5; }
+/* last time's numbers = grey hints (placeholders); what you log = bright. Dimmer than RIR's own dim text so they never look logged. */
+.set-row input::placeholder, .ss-move input::placeholder { color: var(--text-faint); opacity: 1; }
+.set-row.done .setno { color: var(--accent); }
+.ss-move.done .ss-name { color: var(--text); }
+.untouched-line { font-size: 14px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line-soft); border-radius: 10px; }
 .set-row.skipped { opacity: .6; }
 .set-row.skipped .setno { color: var(--danger); }
 .ex-note-field { margin-top: 6px; }
