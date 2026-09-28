@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.28-a';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.28-b';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
