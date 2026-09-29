@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.28-b';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.29-a';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -503,7 +503,7 @@ function renderSession(v) {
       <button class="btn ghost sm" data-action="back-train">‹ Back</button><div class="spacer"></div>
       <input type="date" value="${draft.date}" data-action="session-date" style="width:auto" />
     </div>
-    <h1 class="page-title" style="margin-top:6px">${esc(w.name)}</h1>
+    <div class="title-row"><h1 class="page-title">${esc(w.name)}</h1><span id="clock-slot">${clockSlotHTML(draft)}</span></div>
     ${blocks || emptyState('➕', 'No exercises', 'Add exercises to this workout in Build.', 'Go to Build', 'build')}
     <button class="btn ghost block" data-action="add-exercise-today" style="margin-top:4px">＋ Add exercise</button>
     <button class="btn primary block" data-action="save-session" style="margin-top:12px">Finish &amp; Save workout</button>
@@ -511,6 +511,7 @@ function renderSession(v) {
     <div style="height:64px"></div>`;
   persistDraft();
   resumeRestIfAny();   // if a rest was running when you left, pick it back up
+  if (draft.startedAt) runClock();   // workout clock keeps its true elapsed time across leaving/returning
 }
 
 function collectSession() {
@@ -709,6 +710,14 @@ function untouchedSheet(items) {
 function finishSave() {
   const sess = collectSession();
   if (!sess.entries.length) return toast('Nothing logged yet');
+  // workout clock stops here → save how long it lasted (ignore a clock clearly left running for hours)
+  const d = route._draft;
+  let clockNote = '';
+  if (d && d.startedAt) {
+    const secs = Math.round((Date.now() - d.startedAt) / 1000);
+    if (secs >= 60 && secs <= CLOCK_MAX) { sess.durationSec = secs; sess.startedAt = d.startedAt; clockNote = ` · ${fmtDuration(secs)}`; }
+    else if (secs > CLOCK_MAX) clockNote = ' · clock ignored (ran over 5 h)';
+  }
   // Option A — the "next session" note is one-shot: whatever you leave now becomes next time's nudge,
   // and last time's is consumed (cleared if you left nothing). Pinned notes are untouched.
   (route._draft?.exercises || []).forEach(exd => {
@@ -719,8 +728,8 @@ function finishSave() {
   clearRest(); clearDraft();          // logged for real now — drop the rest timer + autosave
   route = { tab: 'progress' }; render();
   // Push to GitHub right now so it never gets forgotten.
-  if (ghConfigured()) { toast('☁️ Saving to GitHub…'); ghSync(); }
-  else toast('✅ Workout saved');
+  if (ghConfigured()) { toast(`☁️ Saved${clockNote} — syncing…`); ghSync(); }
+  else toast(`✅ Workout saved${clockNote}`);
 }
 
 /* ---------------- PROGRESS ---------------- */
@@ -737,6 +746,8 @@ function renderProgress(v) {
   const rangeTxt = range.end ? `${fmtDate(range.start)} – ${fmtDate(range.end)}` : `${fmtDate(range.start)} – now`;
   const bSessions = state.sessions.filter(s => s.blockId === block.id);
   const blockVol = bSessions.reduce((a, s) => a + sessionVolume(s), 0);
+  const timed = bSessions.filter(s => s.durationSec);   // workouts that had the clock running
+  const avgLen = timed.length ? timed.reduce((a, s) => a + s.durationSec, 0) / timed.length : 0;
 
   // VOLUME = working sets per muscle group this block (cardio excluded)
   const muscleMap = {};
@@ -799,7 +810,7 @@ function renderProgress(v) {
     <button class="tile" data-action="open-session" data-id="${s.id}">
       <span class="emoji-badge">${s.entries.some(e => e.type === 'cardio') ? '🏃' : '🏋️'}</span>
       <span class="grow"><span class="tile-title">${esc(s.workoutName || 'Workout')}</span>
-        <span class="tile-sub">${fmtDateFull(s.date)} · ${Math.round(sessionVolume(s)).toLocaleString()} ${unit()}</span></span>
+        <span class="tile-sub">${fmtDateFull(s.date)} · ${Math.round(sessionVolume(s)).toLocaleString()} ${unit()}${s.durationSec ? ` · ${fmtDuration(s.durationSec)}` : ''}</span></span>
       <span class="tile-chev">›</span></button>`).join('') || `<div class="empty small">No sessions in this block yet.</div>`;
 
   v.innerHTML = `
@@ -812,7 +823,7 @@ function renderProgress(v) {
 
     <div class="stat-grid" style="margin:14px 0 22px">
       <div class="stat"><div class="k">Total sets</div><div class="v">${totalSets}</div><div class="d muted">this block</div></div>
-      <div class="stat"><div class="k">Sessions</div><div class="v">${bSessions.length}</div><div class="d muted">this block</div></div>
+      <div class="stat"><div class="k">Sessions</div><div class="v">${bSessions.length}</div><div class="d muted">${avgLen ? `avg ${fmtDuration(avgLen)}` : 'this block'}</div></div>
       <div class="stat"><div class="k">Tonnage</div><div class="v">${Math.round(blockVol).toLocaleString()}</div><div class="d muted">${unit()}</div></div>
       <div class="stat"><div class="k">PRs</div><div class="v">${prBlock.length}</div><div class="d muted">this block</div></div>
     </div>
@@ -1186,7 +1197,8 @@ function sessionDetailSheet(id) {
   }).join('');
   openSheet(fmtDateFull(s.date), `<div class="stack">${body}</div>
     ${s.note ? `<p class="muted small" style="margin-top:12px">📝 ${esc(s.note)}</p>` : ''}
-    <div class="faint small" style="margin-top:12px">Total tonnage: ${Math.round(sessionVolume(s)).toLocaleString()} ${unit()}</div>
+    ${s.durationSec ? `<div class="muted small" style="margin-top:12px">⏱ ${fmtDuration(s.durationSec)}${s.startedAt ? ` · started ${fmtClockTime(s.startedAt)}` : ''}</div>` : ''}
+    <div class="faint small" style="margin-top:${s.durationSec ? 4 : 12}px">Total tonnage: ${Math.round(sessionVolume(s)).toLocaleString()} ${unit()}</div>
     <button class="btn danger block" data-action="del-session" data-id="${s.id}" style="margin-top:14px">Delete session</button>`);
 }
 
@@ -1355,6 +1367,50 @@ function resumeRestIfAny() {
   runRestInterval();
 }
 
+/* ---------------- workout clock: ▶ Start → running ⏱ → stops at Finish & Save ----------------
+   startedAt lives in the draft (autosaved), so it survives leaving the app or a locked phone.
+   Safety nets: forgot Start → it starts when you log your first set; started by mistake → tap it → restart. */
+let clockInterval = null;
+const fmtElapsed = ms => {
+  const s = Math.max(0, Math.floor(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(x).padStart(2, '0')}` : `${m}:${String(x).padStart(2, '0')}`;
+};
+const fmtDuration = sec => { const m = Math.round(sec / 60); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}`; };
+const fmtClockTime = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const CLOCK_MAX = 5 * 3600;   // longer than this = the clock was left running by mistake → don't save it
+function clockSlotHTML(d) {
+  return d && d.startedAt
+    ? `<button class="wo-clock" id="wo-clock" data-action="clock-menu" title="Workout clock — tap to restart">⏱ ${fmtElapsed(Date.now() - d.startedAt)}</button>`
+    : `<button class="btn sm primary" data-action="start-clock">▶ Start</button>`;
+}
+function paintClock() {
+  const el = document.getElementById('wo-clock'), d = route._draft;
+  if (!el || !d || !d.startedAt) { if (clockInterval) { clearInterval(clockInterval); clockInterval = null; } return; }
+  el.textContent = '⏱ ' + fmtElapsed(Date.now() - d.startedAt);
+}
+function runClock() { if (clockInterval) clearInterval(clockInterval); clockInterval = setInterval(paintClock, 1000); paintClock(); }
+// swap Start ↔ running clock in place (no re-render, so the keyboard/focus stay put)
+function refreshClockSlot() {
+  const slot = document.getElementById('clock-slot'); if (!slot) return;
+  slot.innerHTML = clockSlotHTML(route._draft);
+  if (route._draft && route._draft.startedAt) runClock();
+}
+function startClock(auto) {
+  const d = route._draft; if (!d) return;
+  d.startedAt = Date.now(); d.clockAuto = !!auto;
+  persistDraft(); refreshClockSlot();
+}
+// Safety net 1 — logging your first set starts the clock if you forgot (today's workout only, not a back-filled day).
+function autoStartClock() { const d = route._draft; if (d && !d.startedAt && d.date === todayStr()) startClock(true); }
+// Safety net 2 — tap the clock to restart it (e.g. you tapped Start at home).
+function clockMenu() {
+  const d = route._draft; if (!d || !d.startedAt) return;
+  openSheet('Workout clock', `
+    <p class="muted small" style="margin:0 2px 14px">Started ${fmtClockTime(d.startedAt)}${d.clockAuto ? ' — automatically, when you logged your first set' : ''} · running ${fmtElapsed(Date.now() - d.startedAt)}</p>
+    <button class="btn primary block" data-action="clock-restart">↺ Restart from now</button>
+    <button class="btn ghost block" data-action="close-sheet" style="margin-top:8px">Keep it running</button>`);
+}
+
 /* ============================================================
    EVENTS
    ============================================================ */
@@ -1385,14 +1441,14 @@ document.addEventListener('focusout', e => {
       const c = exd.components[+t.dataset.ci];
       const ok = c && acceptSet(c.sets, +t.dataset.si, r => exd.skippedRounds && exd.skippedRounds[r] != null);
       paintExercise(xi);
-      if (ok) startRestFor(c.name, c.rest);
+      if (ok) { startRestFor(c.name, c.rest); autoStartClock(); }
     } else if (exd.sets) {
       const ok = acceptSet(exd.sets, +t.dataset.si);
       paintExercise(xi);
-      if (ok) startRestFor(exd.name, exd.rest);
+      if (ok) { startRestFor(exd.name, exd.rest); autoStartClock(); }
     }
   } else if (t.dataset.fc && exd.cardio) {          // cardio: leaving a box keeps last time's for the other one
-    if (acceptCardio(exd.cardio)) paintExercise(xi);
+    if (acceptCardio(exd.cardio)) { paintExercise(xi); autoStartClock(); }
   }
   persistDraft();                                    // flush autosave on any field blur
 });
@@ -1411,6 +1467,9 @@ document.addEventListener('click', e => {
 
     /* train */
     case 'open-workout': route = { tab: 'train', workoutId: id, _draft: resumableDraft(id) || buildDraft(woById(id)) }; return render();
+    case 'start-clock': return startClock(false);
+    case 'clock-menu': return clockMenu();
+    case 'clock-restart': { closeSheet(); return startClock(false); }
     case 'toggle-ex-note': {
       const box = btn.closest('.ex-block');
       const f = $('.ex-note-panel', box) || $('.ex-note-field', box);
