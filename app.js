@@ -6,7 +6,7 @@
 
 'use strict';
 
-const APP_VERSION = '2026.09.29-a';   // shown in Settings so we can confirm which build a device is running
+const APP_VERSION = '2026.09.30-a';   // shown in Settings so we can confirm which build a device is running
 const STORE_KEY = 'gymtracker.v1';
 const $  = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -306,6 +306,9 @@ function renderTrainList(v) {
 const fmtClock = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
 const REST_OPTS = [0, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240, 300];
 const restLabel = s => s ? fmtClock(s) : 'Off';
+// Warm-up: a checkbox before set 1 (on by default; turned off per exercise in Build). Never counts toward volume.
+const warmupOn = item => item.warmup !== false;
+const wuToggle = (item, idx) => `<button class="wu-toggle ${warmupOn(item) ? 'on' : ''}" data-action="item-warmup" data-idx="${idx}" title="Warm-up checkbox before set 1">🔥 Warm-up</button>`;
 
 /* ---------- suggestions: last time's numbers shown as grey hints, never pre-typed ----------
    A box only holds a value once you type it, or once you "accept" the set by tapping its reps box and
@@ -403,12 +406,16 @@ function buildDraft(w) {
   const exercises = w.items.map(item => {
     if (item.supersetId) {
       const ss = ssById(item.supersetId);
-      return ss ? draftSuperset(ss, Math.max(1, item.sets || 1), date) : null;
+      if (!ss) return null;
+      const ds = draftSuperset(ss, Math.max(1, item.sets || 1), date);
+      ds.warmup = warmupOn(item);
+      return ds;
     }
     const ex = exById(item.exerciseId);
     if (!ex) return null;
     const de = draftExercise(item.exerciseId, date, ex.type === 'cardio' ? undefined : Math.max(1, item.sets || 1));
     de.rest = item.rest || 0;  // predetermined rest target (seconds) for the count-up bar
+    de.warmup = ex.type !== 'cardio' && warmupOn(item);
     return de;
   }).filter(Boolean);
   return { workoutId: w.id, date, exercises };
@@ -431,6 +438,11 @@ function renderSession(v) {
       <label class="note-line"><span>⏭ For next time <em>shows once</em></span>
         <input data-xi="${xi}" data-fnote="1" value="${esc(exd.note || '')}" placeholder="e.g. add 2.5 kg" /></label>
     </div>`;
+  // Warm-up: one slim checkbox row before set 1 — tap when warmed up → ✓ + rest timer (tap again to undo)
+  const warmupRow = (xi, exd, ss) => `<button class="warmup-row ${ss ? 'ss' : ''} ${exd.warmedUp ? 'done' : ''}" data-action="toggle-warmup" data-xi="${xi}" title="${exd.warmedUp ? 'Tap to undo' : 'Tap when you have warmed up'}">
+      <span class="wu-no">W</span>
+      <span class="wu-cell"><span>Warm-up</span><span class="wu-check">${exd.warmedUp ? '✓' : ''}</span></span>
+    </button>`;
   const tags = (exd) => `${exd.swappedFrom ? `<span class="mini-tag">↔ swapped from ${esc(exd.swappedFrom)}</span>` : ''}${exd.added ? `<span class="mini-tag added">＋ added today</span>` : ''}`;
 
   const blocks = draft.exercises.map((exd, xi) => {
@@ -465,6 +477,7 @@ function renderSession(v) {
         ${tags(exd)}${exCues(ss)}${notePanel(xi, ss, exd)}
         <div class="ss-legend">rest → ${restBadges}</div>
         <div class="ss-head"><span></span><span>weight (${unit()})</span><span>reps</span><span>RIR</span></div>
+        ${exd.warmup ? warmupRow(xi, exd, true) : ''}
         ${rounds}
       </div>`;
     }
@@ -494,6 +507,7 @@ function renderSession(v) {
         <div class="ex-actions">${noteBtn(xi, (ex && (ex.pinnedNote || ex.nextNote)) || exd.note)}${menuBtn(xi)}</div></div>
       ${tags(exd)}${exCues(ex)}${notePanel(xi, ex, exd)}
       <div class="mini-head"><span></span><span>weight (${unit()})</span><span>reps</span><span>RIR</span></div>
+      ${exd.warmup ? warmupRow(xi, exd) : ''}
       ${rows}
     </div>`;
   }).join('');
@@ -537,8 +551,8 @@ function collectSession() {
       const roundSkips = Object.keys(sk).sort((a, b) => a - b).map(ri => `Round ${+ri + 1} skipped: ${sk[ri]}`);
       const moveSkips = [];
       exd.components.forEach(c => c.sets.forEach((s, ri) => { if (s.skipped && !isSk(ri)) moveSkips.push(`Round ${ri + 1} · ${c.name} skipped: ${s.skipReason || ''}`); }));
-      const note = joinNotes(exd.note, ...roundSkips, ...moveSkips);
-      if (components.length || roundSkips.length || moveSkips.length) entries.push({ supersetId: exd.supersetId, name: exd.name, type: 'superset', note, components });
+      const note = joinNotes(exd.note, exd.warmupSkip ? 'Warm-up skipped: ' + exd.warmupSkip : '', ...roundSkips, ...moveSkips);
+      if (components.length || roundSkips.length || moveSkips.length) entries.push({ supersetId: exd.supersetId, name: exd.name, type: 'superset', note, components, ...(exd.warmedUp ? { warmedUp: true } : {}) });
       continue;
     }
     const ex = exById(exd.exId);
@@ -561,7 +575,8 @@ function collectSession() {
       .filter(({ s }) => !s.skipped && setTouched(s))
       .map(({ s, i }) => finalSet(s, f => suggest(exd.sets, i, f)));
     if (sets.length || skipLines.length) {
-      entries.push({ exerciseId: exd.exId, name: exd.name, type: 'lifting', swappedFrom: exd.swappedFrom, note: joinNotes(exd.note, ...skipLines), sets });
+      entries.push({ exerciseId: exd.exId, name: exd.name, type: 'lifting', swappedFrom: exd.swappedFrom,
+        note: joinNotes(exd.note, exd.warmupSkip ? 'Warm-up skipped: ' + exd.warmupSkip : '', ...skipLines), sets, ...(exd.warmedUp ? { warmedUp: true } : {}) });
     }
   }
   return { id: uid(), workoutId: w.id, workoutName: w.name, blockId: w.blockId || state.activeBlockId, date: draft.date, entries };
@@ -629,6 +644,7 @@ function untouchedItems(draft) {
       if (!hasVal(c.duration) && !hasVal(c.level)) out.push({ xi, kind: 'cardio', fillable: hasVal(l.duration) || hasVal(l.level) });
       return;
     }
+    if (exd.warmup && !exd.warmedUp) out.push({ xi, kind: 'warmup', fillable: true });
     if (exd.type === 'superset') {
       const isSk = r => exd.skippedRounds && exd.skippedRounds[r] != null;
       exd.components.forEach((c, ci) => c.sets.forEach((s, r) => {
@@ -646,6 +662,7 @@ function untouchedItems(draft) {
 }
 function fillItem(draft, it) {
   const exd = draft.exercises[it.xi];
+  if (it.kind === 'warmup') { exd.warmedUp = true; return true; }
   if (it.kind === 'cardio') return acceptCardio(exd.cardio);
   if (it.kind === 'move') return acceptSet(exd.components[it.ci].sets, it.si, r => exd.skippedRounds && exd.skippedRounds[r] != null);
   return acceptSet(exd.sets, it.si);
@@ -656,6 +673,9 @@ function skipItems(draft, items, reason) {
   const xis = [...new Set(items.map(it => it.xi))];
   xis.forEach(xi => {
     const exd = draft.exercises[xi];
+    const its = items.filter(it => it.xi === xi);
+    if (its.some(it => it.kind === 'warmup')) exd.warmupSkip = reason;   // "Warm-up skipped: …" in the note
+    if (!its.some(it => it.kind !== 'warmup')) return;                   // only the warm-up was missing
     if (exd.type === 'cardio') { exd.skipped = true; exd.skipReason = reason; return; }
     if (exd.type === 'superset') {
       const isSk = r => exd.skippedRounds && exd.skippedRounds[r] != null;
@@ -681,13 +701,15 @@ function untouchedLabel(draft, items) {
   items.forEach(it => {
     const exd = draft.exercises[it.xi];
     let g = groups.find(x => x.xi === it.xi);
-    if (!g) groups.push(g = { xi: it.xi, name: exd.name, sets: [], rounds: {} });
-    if (it.kind === 'set') g.sets.push(it.si + 1);
+    if (!g) groups.push(g = { xi: it.xi, name: exd.name, sets: [], rounds: {}, warm: false });
+    if (it.kind === 'warmup') g.warm = true;
+    else if (it.kind === 'set') g.sets.push(it.si + 1);
     else if (it.kind === 'move') (g.rounds[it.si] = g.rounds[it.si] || []).push(exd.components[it.ci].name);
   });
   const many = (word, nums) => `${word}${nums.length > 1 ? 's' : ''} ${nums.join(', ')}`;
   return groups.map(g => {
     const exd = draft.exercises[g.xi], parts = [];
+    if (g.warm) parts.push('warm-up');
     if (g.sets.length) parts.push(many('set', g.sets));
     const rounds = Object.keys(g.rounds).sort((a, b) => a - b).map(r => ({ n: +r + 1, moves: g.rounds[r], whole: g.rounds[r].length === exd.components.length }));
     if (rounds.length && rounds.every(x => x.whole)) parts.push(many('round', rounds.map(x => x.n)));   // "rounds 1, 2"
@@ -699,12 +721,14 @@ function untouchedSheet(items) {
   const n = items.length;
   const lines = untouchedLabel(route._draft, items).map(g =>
     `<div class="untouched-line"><strong>${esc(g.name)}</strong>${g.parts.length ? ` <span class="faint">— ${esc(g.parts.join(', '))}</span>` : ''}</div>`).join('');
-  openSheet(n === 1 ? '1 set has no numbers' : `${n} sets have no numbers`, `
-    <p class="muted small" style="margin:0 2px 10px">Did you do ${n === 1 ? 'it' : 'them'}?</p>
+  const hasSets = items.some(it => it.kind !== 'warmup');
+  openSheet('Before you save', `
+    <p class="muted small" style="margin:0 2px 10px">${n === 1 ? 'This isn\u2019t' : 'These aren\u2019t'} logged yet — did you do ${n === 1 ? 'it' : 'them'}?</p>
     <div class="stack" style="margin-bottom:14px">${lines}</div>
-    <button class="btn primary block" data-action="untouched-fill">✓ Yes — use the suggested numbers</button>
+    <button class="btn primary block" data-action="untouched-fill">✓ Yes, I did ${n === 1 ? 'it' : 'them'}</button>
+    ${hasSets ? `<p class="faint small center" style="margin:6px 0 0">Sets take the suggested numbers.</p>` : ''}
     <button class="btn block" data-action="untouched-skip" style="margin-top:8px">⤫ No — skip ${n === 1 ? 'it' : 'them'} (give a reason)</button>
-    <button class="btn ghost block" data-action="close-sheet" style="margin-top:8px">‹ Go back and fill ${n === 1 ? 'it' : 'them'} in</button>`);
+    <button class="btn ghost block" data-action="close-sheet" style="margin-top:8px">‹ Go back</button>`);
 }
 // Log the workout for real (the old Finish & Save body).
 function finishSave() {
@@ -984,6 +1008,7 @@ function renderWorkoutEditor(v) {
         <div class="editor-ctls">
           <label><span>Rounds</span><input type="number" min="1" max="20" value="${item.sets || 1}" data-action="item-sets" data-idx="${idx}" /></label>
           <button class="btn sm" data-action="edit-superset" data-ssid="${ss.id}">Edit moves &amp; rest</button>
+          ${wuToggle(item, idx)}
         </div>
       </div>`;
     }
@@ -994,6 +1019,7 @@ function renderWorkoutEditor(v) {
       : `<div class="editor-ctls">
           <label><span>Sets</span><input type="number" min="1" max="20" value="${item.sets || 1}" data-action="item-sets" data-idx="${idx}" /></label>
           <label><span>Rest</span><select data-action="item-rest" data-idx="${idx}">${REST_OPTS.map(o => `<option value="${o}" ${(item.rest || 0) === o ? 'selected' : ''}>${restLabel(o)}</option>`).join('')}</select></label>
+          ${wuToggle(item, idx)}
         </div>`;
     return `<div class="ex-block" style="padding:12px 14px;margin-bottom:10px">
       <div class="row" style="align-items:center;gap:12px">
@@ -1181,7 +1207,7 @@ function sessionDetailSheet(id) {
     if (e.type === 'superset') {
       const comps = e.skipped ? '<div class="muted small" style="margin-top:3px">⤫ Skipped</div>'
         : (e.components || []).map(c => `<div class="muted small" style="margin-top:3px"><b>${esc(c.name)}</b> · ${c.sets.map(st => `${st.weight}×${st.reps}${st.rir ? ` @${st.rir}` : ''}`).join('  ')}</div>`).join('');
-      return `<div class="card" style="padding:11px 13px${e.skipped ? ';opacity:.7' : ''}"><strong>🔗 ${esc(e.name)}</strong>${comps}
+      return `<div class="card" style="padding:11px 13px${e.skipped ? ';opacity:.7' : ''}"><strong>🔗 ${esc(e.name)}</strong>${e.warmedUp ? ' <span title="warmed up">🔥</span>' : ''}${comps}
         ${e.note ? `<div class="small" style="margin-top:5px;color:var(--warn)">📝 ${esc(e.note).replace(/\n/g, '<br>')}</div>` : ''}</div>`;
     }
     const isCardio = e.type === 'cardio';
@@ -1189,7 +1215,7 @@ function sessionDetailSheet(id) {
       : isCardio ? (e.sets[0] ? `${e.sets[0].duration ?? '–'} min${e.sets[0].level != null ? ` · level ${e.sets[0].level}` : ''}${e.sets[0].distance != null ? ` · ${e.sets[0].distance} km` : ''}` : '')
       : e.sets.map(st => `${st.weight}×${st.reps}${st.rir ? ` @${st.rir}RIR` : ''}`).join('   ');
     const fbs = (isCardio || e.skipped) ? [] : e.sets.map((st, i) => st.fb ? `<div class="faint small">💬 set ${i + 1}: ${esc(st.fb)}</div>` : '').filter(Boolean);
-    return `<div class="card" style="padding:11px 13px${e.skipped ? ';opacity:.7' : ''}"><strong>${esc(e.name || (exById(e.exerciseId) || {}).name || '?')}</strong>
+    return `<div class="card" style="padding:11px 13px${e.skipped ? ';opacity:.7' : ''}"><strong>${esc(e.name || (exById(e.exerciseId) || {}).name || '?')}</strong>${e.warmedUp ? ' <span title="warmed up">🔥</span>' : ''}
       <div class="muted small" style="margin-top:3px">${esc(line)}</div>
       ${e.swappedFrom ? `<div class="faint small" style="margin-top:2px">↔ swapped from ${esc(e.swappedFrom)}</div>` : ''}
       ${e.note ? `<div class="small" style="margin-top:5px;color:var(--warn)">📝 ${esc(e.note).replace(/\n/g, '<br>')}</div>` : ''}
@@ -1467,6 +1493,18 @@ document.addEventListener('click', e => {
 
     /* train */
     case 'open-workout': route = { tab: 'train', workoutId: id, _draft: resumableDraft(id) || buildDraft(woById(id)) }; return render();
+    case 'toggle-warmup': {
+      const exd = route._draft && route._draft.exercises[+btn.dataset.xi];
+      if (!exd) return;
+      exd.warmedUp = !exd.warmedUp;
+      if (!exd.warmedUp) return render();                    // undo instantly
+      delete exd.warmupSkip;
+      render();
+      const rest = exd.type === 'superset' ? ((exd.components[exd.components.length - 1] || {}).rest || 0) : (exd.rest || 0);
+      startRestFor(`Warm-up · ${exd.name}`, rest);           // same rest as your working sets
+      autoStartClock();                                      // forgot ▶ Start? the warm-up starts the clock
+      return;
+    }
     case 'start-clock': return startClock(false);
     case 'clock-menu': return clockMenu();
     case 'clock-restart': { closeSheet(); return startClock(false); }
@@ -1503,6 +1541,7 @@ document.addEventListener('click', e => {
         const nd = draftExercise(newId, route._draft.date, n);
         nd.swappedFrom = exd.swappedFrom || exd.name;
         nd.rest = exd.rest || 0;  // keep the slot's rest target
+        nd.warmup = !!exd.warmup && nd.type !== 'cardio';
         route._draft.exercises[xi] = nd;
         render();
       });
@@ -1524,6 +1563,7 @@ document.addEventListener('click', e => {
       pickExerciseSheet('Add exercise for today', newId => {
         const nd = draftExercise(newId, route._draft.date);
         nd.added = true;
+        nd.warmup = nd.type !== 'cardio';
         route._draft.exercises.push(nd); render();
       });
       return;
@@ -1549,8 +1589,9 @@ document.addEventListener('click', e => {
     }
     case 'untouched-skip': {                  // "no" → one reason, applied to every untouched set
       const draft = route._draft, left = untouchedItems(draft);
-      reasonPrompt(left.length === 1 ? 'Why skip this set?' : `Why skip these ${left.length} sets?`,
-        ['Ran out of time', 'Fatigue', 'Injury / pain', 'Machine unavailable'], reason => {
+      const warm = left.some(it => it.kind === 'warmup');
+      reasonPrompt(left.length === 1 ? 'Why skip this?' : `Why skip these ${left.length}?`,
+        [...(warm ? ['Already warm'] : []), 'Ran out of time', 'Fatigue', 'Injury / pain', 'Machine unavailable'], reason => {
           skipItems(draft, left, reason); finishSave();
         });
       return;
@@ -1630,6 +1671,7 @@ document.addEventListener('click', e => {
       }
       route._ssb = null; save(); closeSheet(); return render();
     }
+    case 'item-warmup': { const w = woById(route.workoutId); const it = w.items[+btn.dataset.idx]; if (it) { it.warmup = !warmupOn(it); save(); } return render(); }
     case 'move-item': {
       const w = woById(route.workoutId); const i = +btn.dataset.idx, dir = +btn.dataset.dir, j = i + dir;
       if (j < 0 || j >= w.items.length) return;
